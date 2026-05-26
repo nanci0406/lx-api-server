@@ -14,9 +14,8 @@ from .log import log
 from aiohttp.web import Response
 import ujson as json
 import re
-import sqlite3
 from common.utils import createMD5
-import os
+from .services import users_service
 
 logger = log('lx_script')
 
@@ -77,26 +76,12 @@ async def generate_script_response(request):
     if not request_key:
         return {'code': 6, 'msg': 'key验证失败', 'data': None}, 403
 
-    # 连接到 SQLite 数据库并查询 key 和对应的 user
-    try:
-        conn = sqlite3.connect('users.db')
-        cursor = conn.cursor()
-        cursor.execute("SELECT name FROM users WHERE key = ?", (request_key,))
-        result = cursor.fetchone()
-        conn.close()
-
-        logger.info(f"查询结果: {result}")  # 记录查询结果
-    except sqlite3.Error as e:
-        logger.error(f"数据库错误: {e}")  # 记录数据库错误
-        return {'code': 4, 'msg': '数据库错误', 'data': None}, 500
-
-    # 如果数据库中找不到 key，返回 403 错误
-    if not result:
-        logger.warning(f"未找到对应的用户，key: {request_key}")  # 记录未找到用户的情况
+    user = users_service.get_user_by_key(request_key)
+    if not user:
+        logger.warning(f"未找到对应的用户，key: {request_key}")
         return {'code': 6, 'msg': 'key验证失败', 'data': None}, 403
 
-    db_user = result[0]  # 获取数据库中的 user 值
-    #
+    db_user = user['name']
 
     # key 验证通过，执行脚本生成逻辑
     try:

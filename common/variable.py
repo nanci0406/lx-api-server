@@ -61,3 +61,4 @@ use_proxy = False
 http_proxy = ''
 https_proxy = ''
 log_files = []
+admin_sessions = {}

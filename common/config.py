@@ -19,6 +19,7 @@ from . import variable
 from .log import log
 from . import default_config
 import threading
+import importlib
 
 logger = log('config_manager')
 
@@ -262,6 +263,91 @@ def write_config(key, value):
         y.dump(config, f)
 
 
+def _apply_runtime_settings():
+    variable.log_length_limit = read_config('common.log_length_limit')
+    variable.debug_mode = read_config('common.debug_mode')
+    variable.use_cookie_pool = bool(read_config('common.cookiepool'))
+    proxy_enable = read_config('common.proxy.enable')
+    variable.use_proxy = bool(proxy_enable)
+    if proxy_enable:
+        http_proxy = read_config('common.proxy.http_value')
+        https_proxy = read_config('common.proxy.https_value')
+        if http_proxy:
+            os.environ['http_proxy'] = http_proxy
+            variable.http_proxy = http_proxy
+        else:
+            os.environ.pop('http_proxy', None)
+            variable.http_proxy = ''
+        if https_proxy:
+            os.environ['https_proxy'] = https_proxy
+            variable.https_proxy = https_proxy
+        else:
+            os.environ.pop('https_proxy', None)
+            variable.https_proxy = ''
+    else:
+        os.environ.pop('http_proxy', None)
+        os.environ.pop('https_proxy', None)
+        variable.http_proxy = ''
+        variable.https_proxy = ''
+
+
+def reload_config():
+    with open('./config/config.yml', 'r', encoding='utf-8') as f:
+        loaded = yaml.load(f.read())
+    if (not isinstance(loaded, dict)):
+        raise ConfigReadException('配置文件并不是一个有效的字典')
+    variable.config = loaded
+    _apply_runtime_settings()
+    logger.info('配置文件已热重载')
+    return variable.config
+
+
+def update_config_and_reload(key, value):
+    write_config(key, value)
+    return reload_config()
+
+
+def restart_scheduler_tasks():
+    from . import scheduler
+    scheduler.tasks.clear()
+    module_names = [
+        'modules.kg.refresh_login',
+        'modules.tx.refresh_login',
+        'modules.wy.refresh_login',
+        'modules.mg.refresh_login',
+    ]
+    for module_name in module_names:
+        if module_name in sys.modules:
+            importlib.reload(sys.modules[module_name])
+        else:
+            importlib.import_module(module_name)
+    logger.info('定时任务已按最新配置重新注册')
+
+
+def hot_reload_config():
+    reload_config()
+    restart_scheduler_tasks()
+    return variable.config
+
+
+def save_config_value(key, value):
+    write_config(key, value)
+    hot_reload_config()
+    return read_config(key)
+
+
+def read_config_text():
+    with open('./config/config.yml', 'r', encoding='utf-8') as f:
+        return f.read()
+
+
+def write_config_text(content):
+    with open('./config/config.yml', 'w', encoding='utf-8') as f:
+        f.write(content)
+    hot_reload_config()
+    return read_config_text()
+
+
 def read_default_config(key):
     try:
         config = default
@@ -384,8 +470,7 @@ def initConfig():
     except FileNotFoundError:
         variable.config = handle_default_config()
     # print(variable.config)
-    variable.log_length_limit = read_config('common.log_length_limit')
-    variable.debug_mode = read_config('common.debug_mode')
+    _apply_runtime_settings()
     logger.debug("配置文件加载成功")
     conn = sqlite3.connect('./cache.db')
 
