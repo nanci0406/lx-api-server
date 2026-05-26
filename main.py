@@ -19,7 +19,6 @@ from aiohttp.web import Response, FileResponse, StreamResponse, Application
 from io import TextIOWrapper
 import sys
 import os
-import sqlite3
 import logging
 from aiohttp import web
 
@@ -39,6 +38,9 @@ from common import variable
 from common import scheduler
 from common import lx_script
 from common import gcsp
+from common import db
+from common.services import users_service, stats_service, module_health
+from webui import routes as webui_routes
 import modules
 
 def handleResult(dic, status=200) -> Response:
@@ -123,14 +125,30 @@ async def handle_before_request(app, handler):
             aiologger.info(
                 f'{request.remote_addr + ("" if (request.remote == request.remote_addr) else f"|proxy@{request.remote}")} - {request.method} "{request.path}", {resp.status}')
             return resp
+        except web.HTTPException:
+            raise
         except:
             logger.error(traceback.format_exc())
-            return {"code": 4, "msg": "内部服务器错误", "data": None}
+            return handleResult({"code": 4, "msg": "内部服务器错误", "data": None}, 500)
     return handle_request
 
 
 async def main(request):
     return handleResult({"code": 0, "msg": "success", "data": None})
+
+
+def validate_request_user(request):
+    request_key = request.headers.get("X-Request-Key")
+    request_user = request.headers.get("X-Request-User")
+    logger.info(f"收到验证请求 - 用户名: {request_user}, Key: {request_key}")
+    if not request_key or not request_user:
+        return None, web.json_response({'code': 6, 'msg': '缺少用户名或 key', 'data': None}, status=403)
+    user = users_service.get_user_by_name_and_key(request_user, request_key)
+    if not user:
+        logger.warning(f"用户验证失败 - 用户名: {request_user}, Key: {request_key} 不存在或不匹配")
+        return None, web.json_response({'code': 6, 'msg': 'key验证失败', 'data': None}, status=403)
+    logger.info(f"用户验证成功 - 用户名: {request_user}")
+    return user, None
 
 
 # 配置日志
@@ -147,69 +165,40 @@ async def handle(request):
     songId = request.match_info.get('songId')
     quality = request.match_info.get('quality')
 
-    # 从配置中读取验证相关设置
     key_enable = config.read_config("security.key.enable")
-    whitelist_hosts = config.read_config('security.whitelist_host')
-    ban_enabled = config.read_config("security.key.ban")
-
-    # 检查是否需要进行用户名和 key 验证
+    current_user = None
     if key_enable:
-        request_key = request.headers.get("X-Request-Key")
-        request_user = request.headers.get("X-Request-User")
-
-        # 记录接收到的用户名和 key
-        logger.info(f"收到验证请求 - 用户名: {request_user}, Key: {request_key}")
-
-        if not request_key or not request_user:
-            logger.warning("缺少用户名或 key")
-            return web.json_response({'code': 6, 'msg': '缺少用户名或 key', 'data': None}, status=403)
-
-        # 连接到数据库并验证用户
-        try:
-            conn = sqlite3.connect('users.db')  # 确保数据库路径正确
-            cursor = conn.cursor()
-
-            # 查询数据库以验证用户名和 key
-            cursor.execute("SELECT name FROM users WHERE name = ? AND key = ?", (request_user, request_key))
-            result = cursor.fetchone()
-            conn.close()
-
-            logger.info(f"查询结果: {result}")  # 记录查询结果
-        except sqlite3.Error as e:
-            logger.error(f"数据库操作失败: {e}")
-            return web.json_response({'code': 4, 'msg': '内部服务器错误', 'data': None}, status=500)
-
-        # 如果数据库中找不到用户，返回 403 错误
-        if not result:
-            logger.warning(f"用户验证失败 - 用户名: {request_user}, Key: {request_key} 不存在或不匹配")
-            return web.json_response({'code': 6, 'msg': 'key验证失败', 'data': None}, status=403)
-
-        # 用户验证成功的日志
-        logger.info(f"用户验证成功 - 用户名: {request_user}")
-
+        current_user, auth_error = validate_request_user(request)
+        if auth_error:
+            return auth_error
 
     if (config.read_config('security.check_lxm.enable') and request.host.split(':')[0] not in config.read_config('security.whitelist_host')):
         lxm = request.headers.get('lxm')
         if (not lxsecurity.checklxmheader(lxm, request.url)):
             if (config.read_config('security.lxm_ban.enable')):
                 config.ban_ip(request.remote_addr)
-        return handleResult({"code": 1, "msg": "lxm请求头验证失败", "data": None}, 403)
+            return handleResult({"code": 1, "msg": "lxm请求头验证失败", "data": None}, 403)
 
     try:
         query = dict(request.query)
         if (method in dir(modules)):
             source_enable = config.read_config(f'module.{source}.enable')
             if not source_enable:
+                stats_service.record_parse(current_user, source, method, songId, quality, False, '此平台已停止服务', request.remote_addr)
                 return handleResult({
                     'code': 4,
                     'msg': '此平台已停止服务',
                     'data': None,
                     "Your IP": request.remote_addr
                 }, 404)
-            return handleResult(await getattr(modules, method)(source, songId, quality, query))
-        else:
-            return handleResult(await modules.other(method, source, songId, quality, query))
-    except:
+            result = await getattr(modules, method)(source, songId, quality, query)
+            stats_service.record_parse(current_user, source, method, songId, quality, True, None, request.remote_addr)
+            return handleResult(result)
+        result = await modules.other(method, source, songId, quality, query)
+        stats_service.record_parse(current_user, source, method, songId, quality, True, None, request.remote_addr)
+        return handleResult(result)
+    except Exception as e:
+        stats_service.record_parse(current_user, source, method, songId, quality, False, str(e), request.remote_addr)
         logger.error(traceback.format_exc())
         return handleResult({'code': 4, 'msg': '内部服务器错误', 'data': None}, 500)
 
@@ -265,8 +254,7 @@ async def handle_local(request):
 app = Application(middlewares=[handle_before_request])
 utils.setGlobal(app, "app")
 
-# mainpage
-app.router.add_get('/', main)
+webui_routes.register_routes(app)
 
 # api
 app.router.add_get('/{method}/{source}/{songId}/{quality}', handle)
@@ -365,9 +353,16 @@ async def run_app():
 
 
 async def initMain():
+    db.init_db()
     await scheduler.run()
     variable.aioSession = aiohttp.ClientSession(trust_env=True)
     localMusic.initMain()
+    asyncio.create_task(module_health.auto_refresh_loop())
+    try:
+        await module_health.refresh_module_health()
+    except Exception:
+        logger.warning('初始化模块状态失败，已忽略')
+        logger.warning(traceback.format_exc())
     try:
         await run_app()
         logger.info("服务器启动成功，请按下Ctrl + C停止")
