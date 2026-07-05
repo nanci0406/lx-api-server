@@ -16,7 +16,17 @@ from common import log
 
 logger = log.log("migu_refresh_login")
 
-async def do_account_refresh(user_info):
+async def do_account_refresh(user_info = None, index = None):
+    if index is not None:
+        users = config.read_config("module.cookiepool.mg") or []
+        if index >= len(users):
+            logger.warning(f'咪咕账号池刷新登录失败: 账号索引不存在({index})')
+            return
+        user_info = users[index]
+    elif user_info is None:
+        user_info = config.read_config("module.mg.user")
+    if not user_info:
+        return
     req = await Httpx.AsyncRequest("https://m.music.migu.cn/migumusic/h5/user/auth/userActiveNotice", {
         "method": "POST",
         "body": "",
@@ -36,16 +46,15 @@ async def do_account_refresh(user_info):
     return logger.info("咪咕session保活成功")
 
 if (variable.use_cookie_pool):
-    users = config.read_config("module.cookiepool.mg")
-    for u in users:
+    users = config.read_config("module.cookiepool.mg") or []
+    for index, u in enumerate(users):
         ref = u.get("refresh_login") if u.get("refresh_login") else {
             "enable": False,
             "interval": 86400
         }
-        if (ref["enable"]):
-            scheduler.append("migu_refresh_login_pooled_" + u["by"], do_account_refresh, ref["interval"], {"user_info": u})
+        if (ref.get("enable")):
+            scheduler.append("migu_refresh_login_pooled_" + str(index), do_account_refresh, ref.get("interval", 86400), {"index": index})
 else:
-    u = config.read_config("module.mg.user")
-    ref = config.read_config("module.mg.user.refresh_login")
-    if (ref["enable"]):
-        scheduler.append("migu_refresh_login", do_account_refresh, ref["interval"], {"user_info": u})
+    ref = config.read_config("module.mg.user.refresh_login") or {}
+    if (ref.get("enable")):
+        scheduler.append("migu_refresh_login", do_account_refresh, ref.get("interval", 86400))

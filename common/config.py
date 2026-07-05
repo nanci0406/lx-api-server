@@ -309,8 +309,9 @@ def update_config_and_reload(key, value):
 
 def restart_scheduler_tasks():
     from . import scheduler
-    scheduler.tasks.clear()
+    scheduler.clear()
     module_names = [
+        'modules.kg.lite_signin',
         'modules.kg.refresh_login',
         'modules.tx.refresh_login',
         'modules.wy.refresh_login',
@@ -318,9 +319,12 @@ def restart_scheduler_tasks():
     ]
     for module_name in module_names:
         if module_name in sys.modules:
-            importlib.reload(sys.modules[module_name])
+            module = importlib.reload(sys.modules[module_name])
         else:
-            importlib.import_module(module_name)
+            module = importlib.import_module(module_name)
+        register_tasks = getattr(module, 'register_tasks', None)
+        if callable(register_tasks):
+            register_tasks()
     logger.info('定时任务已按最新配置重新注册')
 
 

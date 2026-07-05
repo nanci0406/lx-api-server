@@ -354,6 +354,7 @@ async def run_app():
 
 async def initMain():
     db.init_db()
+    config.restart_scheduler_tasks()
     await scheduler.run()
     variable.aioSession = aiohttp.ClientSession(trust_env=True)
     localMusic.initMain()

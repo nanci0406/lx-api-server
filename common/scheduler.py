@@ -17,16 +17,15 @@ from . import log
 
 logger = log.log("scheduler")
 running_event = asyncio.Event()
-global tasks
 tasks = []
 
 class taskWrapper:
-    def __init__(self, name, function, interval = 86400, args = {}, latest_execute = 0):
+    def __init__(self, name, function, interval = 86400, args = None, latest_execute = 0):
         self.function = function
-        self.interval = interval
+        self.interval = int(interval)
         self.name = name
         self.latest_execute = latest_execute
-        self.args = args
+        self.args = args or {}
 
     def check_available(self):
         return (time.time() - self.latest_execute) >= self.interval
@@ -43,11 +42,16 @@ class taskWrapper:
     def __str__(self):
         return f'SchedulerTaskWrapper(name="{self.name}", interval={self.interval}, function={self.function}, args={self.args}, latest_execute={self.latest_execute})'
 
-def append(name, task, interval = 86400, args = {}):
+def append(name, task, interval = 86400, args = None):
     global tasks
+    tasks = [t for t in tasks if t.name != name]
     wrapper = taskWrapper(name, task, interval, args)
     logger.debug(f"new task ({name}) registered")
     return tasks.append(wrapper)
+
+def clear():
+    global tasks
+    tasks.clear()
 
 # 在 thread_runner 函数中修改循环逻辑
 async def thread_runner():
@@ -65,4 +69,5 @@ async def thread_runner():
 async def run():
     logger.debug("scheduler thread starting...")
     task = asyncio.create_task(thread_runner())
+    logger.info(f"scheduler loaded {len(tasks)} task(s): {', '.join([t.name for t in tasks]) if tasks else 'none'}")
     logger.debug("schedluer thread load success")

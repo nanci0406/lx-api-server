@@ -40,12 +40,22 @@ def cookieDict2Str(cookieDict):
     return cookieStr
 
 
-async def refresh(cookie:str):
+async def refresh(cookie: str = None, index = None):
     """
     网易云刷新登录
     
     @param cookie: 网易云音乐cookie
     """
+    if index is not None:
+        cookies = config.read_config("module.cookiepool.wy") or []
+        if index >= len(cookies):
+            logger.warning(f'网易云账号池刷新登录失败: 账号索引不存在({index})')
+            return
+        cookie = cookies[index].get("cookie")
+    elif cookie is None:
+        cookie = config.read_config("module.wy.user.cookie")
+    if not cookie:
+        return
     cookie = cookieStr2Dict(cookie)
     headers = {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0"
@@ -85,16 +95,15 @@ async def refresh(cookie:str):
     return logger.info("网易云刷新登录成功")
 
 if (variable.use_cookie_pool):
-    cookies = config.read_config("module.cookiepool.wy")
-    for c in cookies:
+    cookies = config.read_config("module.cookiepool.wy") or []
+    for index, c in enumerate(cookies):
         ref = c.get("refresh_login") if c.get("refresh_login") else {
             "enable": False,
             "interval": 86400
         }
-        if (ref["enable"]):
-            scheduler.append("wy_refresh_login_pooled_" + c["cookie"][:32], refresh, ref["interval"], {"cookie": c["cookie"]})
+        if (ref.get("enable")):
+            scheduler.append("wy_refresh_login_pooled_" + str(index), refresh, ref.get("interval", 86400), {"index": index})
 else:
-    c = config.read_config("module.wy.user.cookie")
-    ref = config.read_config("module.wy.user.refresh_login")
-    if (ref["enable"]):
-        scheduler.append("wy_refresh_login", refresh, ref["interval"], {"cookie": c})
+    ref = config.read_config("module.wy.user.refresh_login") or {}
+    if (ref.get("enable")):
+        scheduler.append("wy_refresh_login", refresh, ref.get("interval", 86400))

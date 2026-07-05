@@ -22,7 +22,6 @@ async def refresh():
         return
     if (not config.read_config('module.tx.user.refresh_login.enable')):
         return
-    print(config.read_config('module.tx.user.qqmusic_key'))
     if (config.read_config('module.tx.user.qqmusic_key').startswith('W_X')):
         options = {
             'method': 'POST',
@@ -115,7 +114,20 @@ if (config.read_config('module.tx.user.refresh_login.enable') and not variable.u
     scheduler.append('qqmusic_refresh_login', refresh,
                      config.read_config('module.tx.user.refresh_login.interval'))
 
-async def refresh_login_for_pool(user_info):
+def _get_pool_user(index=None, user_info=None):
+    user_list = config.read_config('module.cookiepool.tx') or []
+    if index is None and user_info in user_list:
+        index = user_list.index(user_info)
+    if index is None or index >= len(user_list):
+        logger.warning(f'QQ音乐账号池刷新登录失败: 账号索引不存在({index})')
+        return None, None, user_list
+    return index, user_list[index], user_list
+
+
+async def refresh_login_for_pool(index=None, user_info=None):
+    index, user_info, _ = _get_pool_user(index, user_info)
+    if not user_info:
+        return
     if (user_info['qqmusic_key'].startswith('W_X')):
         options = {
             'method': 'POST',
@@ -156,11 +168,9 @@ async def refresh_login_for_pool(user_info):
             return
         else:
             logger.info(f'为QQ音乐账号(WeChat_{user_info["uin"]})刷新登录成功')
-            user_list = config.read_config('module.cookiepool.tx')
-            user_list[user_list.index(
-                user_info)]['qqmusic_key'] = body['req1']['data']['musickey']
-            user_list[user_list.index(
-                user_info)]['uin'] = str(body['req1']['data']['musicid'])
+            _, _, user_list = _get_pool_user(index, user_info)
+            user_list[index]['qqmusic_key'] = body['req1']['data']['musickey']
+            user_list[index]['uin'] = str(body['req1']['data']['musicid'])
             config.write_config('module.cookiepool.tx', user_list)
             logger.info(f'为QQ音乐账号(WeChat_{user_info["uin"]})数据更新完毕')
             return
@@ -188,11 +198,9 @@ async def refresh_login_for_pool(user_info):
             return
         else:
             logger.info(f'为QQ音乐账号(QQ_{user_info["uin"]})刷新登录成功')
-            user_list = config.read_config('module.cookiepool.tx')
-            user_list[user_list.index(
-                user_info)]['qqmusic_key'] = body['req1']['data']['musickey']
-            user_list[user_list.index(
-                user_info)]['uin'] = str(body['req1']['data']['musicid'])
+            _, _, user_list = _get_pool_user(index, user_info)
+            user_list[index]['qqmusic_key'] = body['req1']['data']['musickey']
+            user_list[index]['uin'] = str(body['req1']['data']['musicid'])
             config.write_config('module.cookiepool.tx', user_list)
             logger.info(f'为QQ音乐账号(QQ_{user_info["uin"]})数据更新完毕')
             return
@@ -201,11 +209,12 @@ async def refresh_login_for_pool(user_info):
         return
 
 def reg_refresh_login_pool_task():
-    user_info_pool = config.read_config('module.cookiepool.tx')
-    for user_info in user_info_pool:
-        if (user_info['refresh_login'].get('enable')):
+    user_info_pool = config.read_config('module.cookiepool.tx') or []
+    for index, user_info in enumerate(user_info_pool):
+        refresh_login = user_info.get('refresh_login') or {}
+        if (refresh_login.get('enable')):
             scheduler.append(
-                f'qqmusic_refresh_login_pooled_{user_info["uin"]}', refresh_login_for_pool, user_info['refresh_login']['interval'], args = {'user_info': user_info})
+                f'qqmusic_refresh_login_pooled_{index}', refresh_login_for_pool, refresh_login.get('interval', 86400), args = {'index': index})
 
 
 if (variable.use_cookie_pool):
