@@ -19,7 +19,6 @@ from aiohttp.web import Response, FileResponse, StreamResponse, Application
 from io import TextIOWrapper
 import sys
 import os
-import logging
 from aiohttp import web
 
 if sys.version_info < (3, 6):
@@ -71,6 +70,11 @@ def start_checkcn_thread() -> None:
 # check request info before start
 
 
+def _is_webui_request(path):
+    """Web 界面的页面、静态文件和后台接口(首页的在线解析仍然算作解析请求，照常限速)"""
+    return path == '/' or path.startswith(('/static/', '/admin', '/api/admin/', '/api/public/status'))
+
+
 async def handle_before_request(app, handler):
     async def handle_request(request):
         try:
@@ -85,22 +89,25 @@ async def handle_before_request(app, handler):
             # check ip
             if (config.check_ip_banned(request.remote_addr)):
                 return handleResult({"code": 1, "msg": "您的IP已被封禁", "data": None}, 403)
-            # check global rate limit
-            if (
-                (time.time() - config.getRequestTime('global'))
-                <
-                (config.read_config("security.rate_limit.global"))
-            ):
-                return handleResult({"code": 5, "msg": "全局限速", "data": None}, 429)
-            if (
-                (time.time() - config.getRequestTime(request.remote_addr))
-                <
-                (config.read_config("security.rate_limit.ip"))
-            ):
-                return handleResult({"code": 5, "msg": "IP限速", "data": None}, 429)
-            # update request time
-            config.updateRequestTime('global')
-            config.updateRequestTime(request.remote_addr)
+            # 限速只针对解析接口：Web 界面打开一次页面就要加载多个静态文件、调用多个接口，
+            # 按"两次请求最小间隔"限速会让后台和首页无法正常使用
+            if not _is_webui_request(request.path):
+                # check global rate limit
+                if (
+                    (time.time() - config.getRequestTime('global'))
+                    <
+                    (config.read_config("security.rate_limit.global"))
+                ):
+                    return handleResult({"code": 5, "msg": "全局限速", "data": None}, 429)
+                if (
+                    (time.time() - config.getRequestTime(request.remote_addr))
+                    <
+                    (config.read_config("security.rate_limit.ip"))
+                ):
+                    return handleResult({"code": 5, "msg": "IP限速", "data": None}, 429)
+                # update request time
+                config.updateRequestTime('global')
+                config.updateRequestTime(request.remote_addr)
             # check host
             if (config.read_config("security.allowed_host.enable")):
                 if request.host.split(":")[0] not in config.read_config("security.allowed_host.list"):
@@ -137,27 +144,19 @@ async def main(request):
     return handleResult({"code": 0, "msg": "success", "data": None})
 
 
-def validate_request_user(request):
+async def validate_request_user(request):
     request_key = request.headers.get("X-Request-Key")
     request_user = request.headers.get("X-Request-User")
-    logger.info(f"收到验证请求 - 用户名: {request_user}, Key: {request_key}")
     if not request_key or not request_user:
         return None, web.json_response({'code': 6, 'msg': '缺少用户名或 key', 'data': None}, status=403)
-    user = users_service.get_user_by_name_and_key(request_user, request_key)
+    # 查询并更新 last_used_at 会读写 sqlite，放到线程池里，不阻塞事件循环
+    user = await db.run_in_db_thread(users_service.get_user_by_name_and_key, request_user, request_key)
     if not user:
-        logger.warning(f"用户验证失败 - 用户名: {request_user}, Key: {request_key} 不存在或不匹配")
+        logger.warning(f"用户验证失败 - 用户名: {request_user} 不存在、已禁用或 key 不匹配")
         return None, web.json_response({'code': 6, 'msg': 'key验证失败', 'data': None}, status=403)
     logger.info(f"用户验证成功 - 用户名: {request_user}")
     return user, None
 
-
-# 配置日志
-logger = logging.getLogger("main")
-logger.setLevel(logging.INFO)
-handler = logging.StreamHandler()
-formatter = logging.Formatter('%(asctime)s|[%(name)s/%(levelname)s]|%(message)s')
-handler.setFormatter(formatter)
-logger.addHandler(handler)
 
 async def handle(request):
     method = request.match_info.get('method')
@@ -165,10 +164,14 @@ async def handle(request):
     songId = request.match_info.get('songId')
     quality = request.match_info.get('quality')
 
+    if source not in modules.SUPPORTED_SOURCES:
+        # 先于配置读取：未知(或已下线)的音源名不应该在配置里被当作 module.<名字> 去查找
+        return handleResult({'code': 1, 'msg': '未知的源或不支持的方法', 'data': None})
+
     key_enable = config.read_config("security.key.enable")
     current_user = None
     if key_enable:
-        current_user, auth_error = validate_request_user(request)
+        current_user, auth_error = await validate_request_user(request)
         if auth_error:
             return auth_error
 
@@ -181,24 +184,26 @@ async def handle(request):
 
     try:
         query = dict(request.query)
+        # 关闭了的平台对所有方法都不再提供服务(以前 info 等不在 modules 里直接定义的方法会绕过这个开关)
+        if not config.read_config(f'module.{source}.enable'):
+            await stats_service.record_parse_async(current_user, source, method, songId, quality, False, '此平台已停止服务', request.remote_addr)
+            return handleResult({
+                'code': 4,
+                'msg': '此平台已停止服务',
+                'data': None,
+                "Your IP": request.remote_addr
+            }, 404)
         if (method in dir(modules)):
-            source_enable = config.read_config(f'module.{source}.enable')
-            if not source_enable:
-                stats_service.record_parse(current_user, source, method, songId, quality, False, '此平台已停止服务', request.remote_addr)
-                return handleResult({
-                    'code': 4,
-                    'msg': '此平台已停止服务',
-                    'data': None,
-                    "Your IP": request.remote_addr
-                }, 404)
             result = await getattr(modules, method)(source, songId, quality, query)
-            stats_service.record_parse(current_user, source, method, songId, quality, True, None, request.remote_addr)
-            return handleResult(result)
-        result = await modules.other(method, source, songId, quality, query)
-        stats_service.record_parse(current_user, source, method, songId, quality, True, None, request.remote_addr)
+        else:
+            result = await modules.other(method, source, songId, quality, query)
+        # 模块用 code 表示结果(如获取失败时返回 code 2 和原因)，不能只要没抛异常就记为成功
+        success = isinstance(result, dict) and result.get('code') == 0
+        error = None if success else str((result.get('msg') if isinstance(result, dict) else None) or '解析失败')
+        await stats_service.record_parse_async(current_user, source, method, songId, quality, success, error, request.remote_addr)
         return handleResult(result)
     except Exception as e:
-        stats_service.record_parse(current_user, source, method, songId, quality, False, str(e), request.remote_addr)
+        await stats_service.record_parse_async(current_user, source, method, songId, quality, False, str(e), request.remote_addr)
         logger.error(traceback.format_exc())
         return handleResult({'code': 4, 'msg': '内部服务器错误', 'data': None}, 500)
 
@@ -285,11 +290,12 @@ async def run_app_host(host):
             final_ssl_ports = []
             final_ports = []
             for p in ports:
-                if (p not in ssl_ports and f'{host}_{p}' not in variable.running_ports):
-                    final_ports.append(p)
+                if (f'{host}_{p}' in variable.running_ports):
+                    continue  # 已经监听成功的端口(重试时)不再重复绑定
+                if (p in ssl_ports):
+                    final_ssl_ports.append(p)
                 else:
-                    if (p not in variable.running_ports):
-                        final_ssl_ports.append(p)
+                    final_ports.append(p)
             # 读取证书和私钥路径
             cert_path = config.read_config('common.ssl_info.path.cert')
             privkey_path = config.read_config(
@@ -301,7 +307,7 @@ async def run_app_host(host):
 
             # 启动 HTTP 端口监听
             for port in final_ports:
-                if (port not in variable.running_ports):
+                if (f'{host}_{port}' not in variable.running_ports):
                     http_site = aiohttp.web.TCPSite(
                         http_runner, host, port)
                     await http_site.start()
@@ -325,7 +331,7 @@ async def run_app_host(host):
 
                     # 启动 HTTPS 端口监听
                     for port in ssl_ports:
-                        if (port not in variable.running_ports):
+                        if (f'{host}_{port}' not in variable.running_ports):
                             https_site = aiohttp.web.TCPSite(
                                 https_runner, host, port, ssl_context=ssl_context)
                             await https_site.start()
@@ -393,7 +399,8 @@ if __name__ == "__main__":
     except:
         logger.critical('初始化出错，请检查日志')
         logger.critical(traceback.format_exc())
-        with open('dumprecord_{}.txt'.format(int(time.time())), 'w', encoding='utf-8') as f:
+        dump_filename = 'dumprecord_{}.txt'.format(int(time.time()))
+        with open(dump_filename, 'w', encoding='utf-8') as f:
             f.write(traceback.format_exc())
             e = '\n\nGlobal variable object:\n\n'
             for k in dir(variable):
@@ -403,7 +410,7 @@ if __name__ == "__main__":
             for k in sys.modules:
                 e += (k + ' = ' + str(sys.modules[k]) + '\n') if (not k.startswith('_')) else ''
             f.write(e)
-        logger.critical('dumprecord_{}.txt 已保存至当前目录'.format(int(time.time())))
+        logger.critical('{} 已保存至当前目录'.format(dump_filename))
     finally:
         for f in variable.log_files:
             if (f and isinstance(f, TextIOWrapper)):

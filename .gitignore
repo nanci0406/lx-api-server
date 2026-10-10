@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 运行产物(首次启动自动生成)
+config/
+logs/
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+dumprecord_*.txt
+audio/
+temp/
+
+# IDE
+.idea/
+.vscode/

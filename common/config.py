@@ -240,18 +240,30 @@ def push_to_list(key, obj):
 
 
 def write_config(key, value):
+    write_config_batch({key: value})
+
+
+def write_config_batch(items, sync_memory=True):
+    """
+    一次写入多个配置项(key 为点号分隔路径)：只读一次、写一次，并同步内存。
+    先写临时文件再整体替换，避免写到一半进程退出导致配置文件损坏。
+
+    sync_memory=False 时只写文件，不改动内存中的配置(用于后台"仅保存"，
+    保存后需要热重载才会生效)。
+    """
     config = None
     with open('./config/config.yml', 'r', encoding='utf-8') as f:
         config = yaml_.YAML().load(f)
 
-    keys = key.split('.')
-    current = config
-    for k in keys[:-1]:
-        if k not in current:
-            current[k] = {}
-        current = current[k]
+    for key, value in items.items():
+        keys = key.split('.')
+        current = config
+        for k in keys[:-1]:
+            if k not in current:
+                current[k] = {}
+            current = current[k]
 
-    current[keys[-1]] = value
+        current[keys[-1]] = value
 
     # 设置保留注释和空行的参数
     y = yaml_.YAML()
@@ -259,8 +271,27 @@ def write_config(key, value):
     y.preserve_blank_lines = True
 
     # 写入配置并保留注释和空行
-    with open('./config/config.yml', 'w', encoding='utf-8') as f:
+    tmp_path = './config/config.yml.tmp'
+    with open(tmp_path, 'w', encoding='utf-8') as f:
         y.dump(config, f)
+    os.replace(tmp_path, './config/config.yml')
+
+    # 同步内存中的配置，否则 read_config 读到的仍是旧值
+    # （例如刷新登录后新的 qqmusic_key 只写进了文件，下一轮刷新又拿旧 key 去刷）
+    if sync_memory:
+        for key, value in items.items():
+            _sync_memory_config(key.split('.'), value)
+
+
+def _sync_memory_config(keys, value):
+    current = variable.config
+    if not isinstance(current, dict):
+        return
+    for k in keys[:-1]:
+        if not isinstance(current.get(k), dict):
+            current[k] = {}
+        current = current[k]
+    current[keys[-1]] = value
 
 
 def _apply_runtime_settings():
@@ -315,7 +346,6 @@ def restart_scheduler_tasks():
         'modules.kg.refresh_login',
         'modules.tx.refresh_login',
         'modules.wy.refresh_login',
-        'modules.mg.refresh_login',
     ]
     for module_name in module_names:
         if module_name in sys.modules:
@@ -325,6 +355,9 @@ def restart_scheduler_tasks():
         register_tasks = getattr(module, 'register_tasks', None)
         if callable(register_tasks):
             register_tasks()
+    # 解析记录定时清理(不属于某个音源，单独注册)
+    from .services import stats_service
+    stats_service.register_tasks()
     logger.info('定时任务已按最新配置重新注册')
 
 
@@ -346,8 +379,10 @@ def read_config_text():
 
 
 def write_config_text(content):
-    with open('./config/config.yml', 'w', encoding='utf-8') as f:
+    tmp_path = './config/config.yml.tmp'
+    with open(tmp_path, 'w', encoding='utf-8') as f:
         f.write(content)
+    os.replace(tmp_path, './config/config.yml')
     hot_reload_config()
     return read_config_text()
 
@@ -538,11 +573,11 @@ value TEXT)''')
     banlist = read_data('banList')
     banlistRaw = read_data('banListRaw')
     count = 0
-    for b in banlist:
+    for b in list(banlist):  # 遍历副本，避免边遍历边删除漏掉元素
         if (b['expire'] and (time.time() > b['expire_time'])):
             count += 1
             banlist.remove(b)
-            if (b['ip'] in banlistRaw):
+            if (b['ip'] in banlistRaw and not any(x['ip'] == b['ip'] for x in banlist)):
                 banlistRaw.remove(b['ip'])
     write_data('banList', banlist)
     write_data('banListRaw', banlistRaw)
@@ -559,12 +594,24 @@ value TEXT)''')
 
 
 def ban_ip(ip_addr, ban_time=-1):
+    """
+    封禁 IP
+
+    @param ban_time: 封禁时长(秒)，-1 表示使用配置里的 security.banlist.expire.length；
+                     时长 <= 0 或关闭了 security.banlist.expire.enable 时为永久封禁
+    """
     if read_config('security.banlist.enable'):
+        length = read_config('security.banlist.expire.length') if (ban_time == -1) else ban_time
+        length = int(length or 0)
+        expire = bool(read_config('security.banlist.expire.enable')) and length > 0
         banList = read_data('banList')
+        # 同一个 IP 只保留最新的一条封禁记录
+        banList = [b for b in banList if b['ip'] != ip_addr]
         banList.append({
             'ip': ip_addr,
-            'expire': read_config('security.banlist.expire.enable'),
-            'expire_time': read_config('security.banlist.expire.length') if (ban_time == -1) else ban_time,
+            'expire': expire,
+            # 存的是到期的时间戳，不是时长
+            'expire_time': int(time.time()) + length if expire else 0,
         })
         write_data('banList', banList)
         banListRaw = read_data('banListRaw')
@@ -581,25 +628,25 @@ def check_ip_banned(ip_addr):
     if read_config('security.banlist.enable'):
         banList = read_data('banList')
         banlistRaw = read_data('banListRaw')
-        if (ip_addr in banlistRaw):
-            for b in banList:
-                if (b['ip'] == ip_addr):
-                    if (b['expire']):
-                        if (b['expire_time'] > int(time.time())):
-                            return True
-                        else:
-                            banList.remove(b)
-                            banlistRaw.remove(b['ip'])
-                            write_data('banListRaw', banlistRaw)
-                            write_data('banList', banList)
-                            return False
-                    else:
-                        return True
-                else:
-                    return False
+        if (ip_addr not in banlistRaw):
             return False
-        else:
-            return False
+        banned = False
+        changed = False
+        for b in list(banList):
+            if (b['ip'] != ip_addr):
+                continue
+            if (not b['expire'] or b['expire_time'] > int(time.time())):
+                banned = True
+            else:
+                # 已过期，移除这条记录
+                banList.remove(b)
+                changed = True
+        if changed:
+            if (not any(b['ip'] == ip_addr for b in banList) and ip_addr in banlistRaw):
+                banlistRaw.remove(ip_addr)
+            write_data('banListRaw', banlistRaw)
+            write_data('banList', banList)
+        return banned
     else:
         if (variable.banList_suggest <= 10):
             variable.banList_suggest += 1

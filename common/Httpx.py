@@ -15,7 +15,6 @@ import zlib
 import ujson as json
 import re
 import time
-import pickle
 from . import log
 from . import config
 from . import utils
@@ -71,6 +70,23 @@ ua_list = [ 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gec
 # 日志记录器
 logger = log.log('http_utils')
 
+# 响应缓存使用 JSON 序列化，不再用 pickle：缓存库内容一旦被篡改，pickle.loads 可以执行任意代码。
+# 旧版本留下的 pickle 缓存无法按 JSON 解析，会被当作未命中并在重新请求后被覆盖。
+def _serialize_response(status, headers, content) -> str:
+    payload = {
+        'status': int(status),
+        'headers': {str(k): str(v) for k, v in dict(headers).items()},
+        'content': utils.createBase64Encode(content),
+    }
+    return utils.createBase64Encode(json.dumps(payload).encode('utf-8'))
+
+def _deserialize_response(data):
+    try:
+        payload = json.loads(utils.createBase64Decode(data))
+        return int(payload['status']), dict(payload['headers']), utils.createBase64Decode(payload['content'])
+    except Exception:
+        return None
+
 def request(url: str, options = {}) -> requests.Response:
     '''
     Http请求主函数, 用于发送网络请求
@@ -96,9 +112,16 @@ def request(url: str, options = {}) -> requests.Response:
     cache_key = utils.createMD5(cache_key)
     if options.get("cache") and options["cache"] != "no-cache":
         cache = config.getCache("httpx", cache_key)
-        if cache:
+        restored = _deserialize_response(cache["data"]) if cache else None
+        if restored:
             logger.debug(f"请求 {url} 有可用缓存")
-            return pickle.loads(utils.createBase64Decode(cache["data"]))
+            status, headers, content = restored
+            cached_resp = requests.Response()
+            cached_resp.status_code = status
+            cached_resp.headers.update(headers)
+            cached_resp._content = content
+            cached_resp.url = url
+            return cached_resp
     if "cache" in list(options.keys()):
         cache_info = options.get("cache")
         options.pop("cache")
@@ -168,9 +191,9 @@ def request(url: str, options = {}) -> requests.Response:
             logger.debug('response is not text binary, ignore logging it')
     # 缓存写入
     if (cache_info and cache_info != "no-cache"):
-        cache_data = pickle.dumps(req)
+        cache_data = _serialize_response(req.status_code, req.headers, req.content)
         expire_time = (cache_info if isinstance(cache_info, int) else 3600) + int(time.time())
-        config.updateCache("httpx", cache_key, {"expire": True, "time": expire_time, "data": utils.createBase64Encode(cache_data)})
+        config.updateCache("httpx", cache_key, {"expire": True, "time": expire_time, "data": cache_data})
         logger.debug("缓存已更新: " + url)
     def _json():
         return json.loads(req.content)
@@ -187,17 +210,19 @@ def checkcn():
         if (not variable.iscn):
             variable.fakeip = config.read_config('common.fakeip')
             logger.info(f"您在非中国大陆服务器({body.country})上启动了项目，已自动开启ip伪装")
-            logger.warning("此方式无法解决咪咕音乐的链接获取问题，您可以配置代理，服务器地址可在下方链接中找到\nhttps://hidemy.io/cn/proxy-list/?country=CN#list")
+            logger.warning("海外服务器可能无法获取部分平台的链接，如有需要请配置国内代理，代理地址可在下方链接中找到\nhttps://hidemy.io/cn/proxy-list/?country=CN#list")
     except Exception as e:
         logger.warning('检查服务器位置失败，已忽略')
         logger.warning(traceback.format_exc())
 
 class ClientResponse:
-    # 这个类为了方便aiohttp响应与requests响应的跨类使用，也为了解决pickle无法缓存的问题
-    def __init__(self, status, content, headers):
+    # 这个类为了方便aiohttp响应与requests响应的跨类使用，也方便序列化后缓存
+    def __init__(self, status, content, headers, set_cookies=None):
         self.status = status
         self.content = content
         self.headers = headers
+        # headers 是普通字典，同名的多个 Set-Cookie 会被合并成一个，所以单独保留完整的列表
+        self.set_cookies = list(set_cookies or [])
         self.text = content.decode("utf-8", errors='ignore')
     
     def json(self):
@@ -208,8 +233,9 @@ async def convert_to_requests_response(aiohttp_response) -> ClientResponse:
     content = await aiohttp_response.content.read()  # 从aiohttp响应中读取字节数据
     status_code = aiohttp_response.status  # 获取状态码
     headers = dict(aiohttp_response.headers.items())  # 获取标头信息并转换为字典
-    
-    return ClientResponse(status_code, content, headers)
+    set_cookies = aiohttp_response.headers.getall('Set-Cookie', [])
+
+    return ClientResponse(status_code, content, headers, set_cookies)
 
 async def AsyncRequest(url, options = {}) -> ClientResponse:
     '''
@@ -238,10 +264,11 @@ async def AsyncRequest(url, options = {}) -> ClientResponse:
     cache_key = utils.createMD5(cache_key)
     if options.get("cache") and options["cache"] != "no-cache":
         cache = config.getCache("httpx_async", cache_key)
-        if cache:
+        restored = _deserialize_response(cache["data"]) if cache else None
+        if restored:
             logger.debug(f"请求 {url} 有可用缓存")
-            c = pickle.loads(utils.createBase64Decode(cache["data"]))
-            return c
+            status, headers, content = restored
+            return ClientResponse(status, content, headers)
     if "cache" in list(options.keys()):
         cache_info = options.get("cache")
         options.pop("cache")
@@ -314,9 +341,9 @@ async def AsyncRequest(url, options = {}) -> ClientResponse:
             logger.debug('response is not text binary, ignore logging it')
     # 缓存写入
     if (cache_info and cache_info != "no-cache"):
-        cache_data = pickle.dumps(req)
+        cache_data = _serialize_response(req.status, req.headers, req.content)
         expire_time = (cache_info if isinstance(cache_info, int) else 3600) + int(time.time())
-        config.updateCache("httpx_async", cache_key, {"expire": True, "time": expire_time, "data": utils.createBase64Encode(cache_data)})
+        config.updateCache("httpx_async", cache_key, {"expire": True, "time": expire_time, "data": cache_data})
         logger.debug("缓存已更新: " + url)
     # 返回请求
     return req

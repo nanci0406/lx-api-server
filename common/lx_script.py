@@ -68,17 +68,22 @@ async def get_script():
     else:
         logger.warning('请求源脚本内容失败')
 
+def supported_quality(quality):
+    """只保留当前支持的音源：旧配置里可能还留着已下线的音源(如酷我、咪咕)，不能写进脚本让客户端以为可用"""
+    import modules
+    return {source: qualities for source, qualities in (quality or {}).items()
+            if source in modules.SUPPORTED_SOURCES}
+
 async def generate_script_response(request):
     # 从请求中获取 key
     request_key = request.query.get('key')
-    logger.info(f"尝试使用 key: {request_key} 验证用户")  # 日志记录 key
 
     if not request_key:
         return {'code': 6, 'msg': 'key验证失败', 'data': None}, 403
 
     user = users_service.get_user_by_key(request_key)
     if not user:
-        logger.warning(f"未找到对应的用户，key: {request_key}")
+        logger.warning("脚本下载验证失败：未找到对应的用户或用户已禁用")
         return {'code': 6, 'msg': 'key验证失败', 'data': None}, 403
 
     db_user = user['name']
@@ -118,7 +123,7 @@ async def generate_script_response(request):
             new_script_lines.append(oline)
 
     r = '\n'.join(new_script_lines)
-    r = re.sub(r'const MUSIC_QUALITY = {[^}]+}', f'const MUSIC_QUALITY = JSON.parse(\'{json.dumps(config.read_config("common.download_config.quality"))}\')', r)
+    r = re.sub(r'const MUSIC_QUALITY = {[^}]+}', f'const MUSIC_QUALITY = JSON.parse(\'{json.dumps(supported_quality(config.read_config("common.download_config.quality")))}\')', r)
 
     # 用于检查更新
     if config.read_config("common.download_config.update"):

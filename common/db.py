@@ -1,8 +1,13 @@
+import asyncio
+import base64
+import functools
+import hashlib
+import hmac
 import os
+import secrets
 import sqlite3
 import time
-import secrets
-import hashlib
+from concurrent.futures import ThreadPoolExecutor
 
 from .log import log
 
@@ -11,14 +16,77 @@ logger = log('app_db')
 DB_PATH = './app.db'
 
 
+# app.db 的读写在请求路径上(鉴权、解析统计)，放到专用线程里执行以免阻塞事件循环；
+# 只用 1 个线程，让写操作串行，避免互相争抢 sqlite 的写锁。
+_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='app-db')
+
+
+async def run_in_db_thread(func, *args):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_executor, functools.partial(func, *args))
+
+
 def get_connection():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
     return conn
 
 
+# 密码哈希：加盐 + scrypt(OpenSSL 不支持 scrypt 时退回 PBKDF2-HMAC-SHA256)。
+# 存储格式 "算法$参数...$盐(base64)$哈希(base64)"，便于以后调整参数；
+# 旧版本存的是无盐 sha256 十六进制串，仍可校验，登录成功后会自动升级。
+SCRYPT_N = 2 ** 14
+SCRYPT_R = 8
+SCRYPT_P = 1
+PBKDF2_ITERATIONS = 600000
+
+
+def _b64(data: bytes) -> str:
+    return base64.b64encode(data).decode('ascii')
+
+
 def hash_password(password: str) -> str:
-    return hashlib.sha256(password.encode('utf-8')).hexdigest()
+    salt = os.urandom(16)
+    raw = password.encode('utf-8')
+    if hasattr(hashlib, 'scrypt'):
+        try:
+            digest = hashlib.scrypt(raw, salt=salt, n=SCRYPT_N, r=SCRYPT_R, p=SCRYPT_P, dklen=32)
+            return f'scrypt${SCRYPT_N}${SCRYPT_R}${SCRYPT_P}${_b64(salt)}${_b64(digest)}'
+        except (ValueError, MemoryError):
+            pass  # 当前 OpenSSL 限制了内存，退回 PBKDF2
+    digest = hashlib.pbkdf2_hmac('sha256', raw, salt, PBKDF2_ITERATIONS, dklen=32)
+    return f'pbkdf2${PBKDF2_ITERATIONS}${_b64(salt)}${_b64(digest)}'
+
+
+def verify_password(password: str, stored: str):
+    """
+    校验密码
+
+    @return: (是否匹配, 是否需要升级哈希)
+    """
+    raw = password.encode('utf-8')
+    stored = stored or ''
+    try:
+        if stored.startswith('scrypt$'):
+            _, n, r, p, salt, digest = stored.split('$')
+            expected = base64.b64decode(digest)
+            actual = hashlib.scrypt(raw, salt=base64.b64decode(salt), n=int(n), r=int(r), p=int(p), dklen=len(expected))
+            return hmac.compare_digest(actual, expected), False
+        if stored.startswith('pbkdf2$'):
+            _, iterations, salt, digest = stored.split('$')
+            expected = base64.b64decode(digest)
+            actual = hashlib.pbkdf2_hmac('sha256', raw, base64.b64decode(salt), int(iterations), dklen=len(expected))
+            return hmac.compare_digest(actual, expected), False
+    except (ValueError, TypeError, MemoryError):
+        return False, False
+    # 旧版本：无盐 sha256
+    legacy = hashlib.sha256(raw).hexdigest()
+    try:
+        if hmac.compare_digest(legacy, stored):
+            return True, True
+    except TypeError:  # 存储值含非 ASCII 字符，必然不是旧版哈希
+        pass
+    return False, False
 
 
 def _create_tables(conn):
@@ -56,8 +124,13 @@ def _create_tables(conn):
         source TEXT PRIMARY KEY,
         status TEXT NOT NULL,
         detail TEXT,
-        checked_at INTEGER NOT NULL
+        checked_at INTEGER NOT NULL,
+        admin_detail TEXT
     )''')
+    # 旧版本创建的表没有 admin_detail 列(仅管理员可见的详细信息)
+    columns = [row[1] for row in cursor.execute('PRAGMA table_info(module_health)').fetchall()]
+    if 'admin_detail' not in columns:
+        cursor.execute('ALTER TABLE module_health ADD COLUMN admin_detail TEXT')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_parse_logs_user_time ON parse_logs(user_id, created_at DESC)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_parse_logs_source_time ON parse_logs(source, created_at DESC)')
     conn.commit()
@@ -94,19 +167,26 @@ def _ensure_default_admin(conn):
     row = cursor.execute('SELECT COUNT(*) FROM admins').fetchone()
     if row[0] != 0:
         return
-    password = os.getenv('LX_ADMIN_PASSWORD') or secrets.token_urlsafe(10)
+    env_password = os.getenv('LX_ADMIN_PASSWORD')
+    password = env_password or secrets.token_urlsafe(10)
     username = os.getenv('LX_ADMIN_USERNAME') or 'admin'
     cursor.execute(
         'INSERT INTO admins (username, password_hash, created_at) VALUES (?, ?, ?)',
         (username, hash_password(password), int(time.time())),
     )
     conn.commit()
-    logger.warning(f'已创建默认管理员账号 {username}，密码：{password}')
+    if env_password:
+        # 密码是使用者自己指定的，不写进日志
+        logger.warning(f'已创建管理员账号 {username}，密码取自环境变量 LX_ADMIN_PASSWORD')
+    else:
+        logger.warning(f'已创建默认管理员账号 {username}，密码：{password}')
 
 
 def init_db():
     conn = get_connection()
     try:
+        # WAL 模式下读写互不阻塞，适合"请求线程写统计、后台页面读统计"的使用方式
+        conn.execute('PRAGMA journal_mode=WAL')
         _create_tables(conn)
         _migrate_legacy_users(conn)
         _ensure_default_admin(conn)

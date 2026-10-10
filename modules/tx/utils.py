@@ -69,3 +69,26 @@ def formatSinger(singerList):
     for s in singerList:
         n.append(s['name'])
     return '、'.join(n)
+
+
+def login_kind(user_info):
+    """
+    判断账号的登录类型，决定刷新登录/检查登录状态时用哪一种请求
+
+    优先使用登录时保存的 login_type(1 微信、2 QQ)，它来自登录接口的返回，比 key 的前缀可靠
+    (例如手机验证码登录得到的 key 不一定以 W_X / Q_H_L 开头)；
+    没有 login_type(手动配置的账号)时才按 key 前缀判断。
+
+    @return: 'wx' | 'qq' | None(无法判断)
+    """
+    login_type = str(user_info.get('login_type') or '').strip()
+    if login_type == '1':
+        return 'wx'
+    if login_type == '2':
+        return 'qq'
+    key = str(user_info.get('qqmusic_key') or '')
+    if key.startswith('W_X'):
+        return 'wx'
+    if key.startswith('Q_H_L'):
+        return 'qq'
+    return None

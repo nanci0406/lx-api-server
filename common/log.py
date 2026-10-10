@@ -204,6 +204,16 @@ class fileWriter(logging.Handler):
         self.file.write(self.format(record) + '\n')
         self.file.flush()
 
+_opened_log_files = {}
+
+def _open_log_file(filename):
+    f = _opened_log_files.get(filename)
+    if f is None or f.closed:
+        f = open(filename, 'a+', encoding='utf-8')
+        _opened_log_files[filename] = f
+        log_files.append(f)
+    return f
+
 class log:
     # 主类
     def __init__(self, module_name='Not named logger', output_level='INFO', filename=''):
@@ -230,14 +240,15 @@ class log:
                 filename = filterFileName(filename)
             else:
                 filename = './logs/' + module_name + '.log'
-            self.file = open(filename, 'a+', encoding='utf-8')
-            log_files.append(self.file)
-        console_handler = logging.StreamHandler()
-        console_handler.setFormatter(formatter)
+            self.file = _open_log_file(filename)
         self.module_name = module_name
-        self._logger.addHandler(console_handler)
-        debug_handler = logging.StreamHandler()
-        debug_handler.setFormatter(formatter)
+        # 同名的 log 对象会被重复创建(例如配置热重载会重新加载各模块)，
+        # 控制台 handler 和日志文件只创建一次，否则每次热重载都会多打一行重复日志、多开一个文件句柄
+        if not any(getattr(h, '_lx_console', False) for h in self._logger.handlers):
+            console_handler = logging.StreamHandler()
+            console_handler.setFormatter(formatter)
+            console_handler._lx_console = True
+            self._logger.addHandler(console_handler)
 
     def debug(self, message, allow_hidden=True):
         if (log_file):
