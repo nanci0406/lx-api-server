@@ -104,7 +104,7 @@ class ParseTools:
         return '\n'.join(lrcLines)
 
     def removeTag(self, string):
-        return re.sub(r'^[\S\s]*?LyricContent="', '', string).replace('"\/>[\S\s]*?$', '')
+        return re.sub(r'^[\S\s]*?LyricContent="', '', string).replace(r'"\/>[\S\s]*?$', '')
 
     def getIntv(self, interval):
         if not interval:
