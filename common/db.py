@@ -56,8 +56,13 @@ def _create_tables(conn):
         source TEXT PRIMARY KEY,
         status TEXT NOT NULL,
         detail TEXT,
-        checked_at INTEGER NOT NULL
+        checked_at INTEGER NOT NULL,
+        admin_detail TEXT
     )''')
+    # 旧版本创建的表没有 admin_detail 列(仅管理员可见的详细信息)
+    columns = [row[1] for row in cursor.execute('PRAGMA table_info(module_health)').fetchall()]
+    if 'admin_detail' not in columns:
+        cursor.execute('ALTER TABLE module_health ADD COLUMN admin_detail TEXT')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_parse_logs_user_time ON parse_logs(user_id, created_at DESC)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_parse_logs_source_time ON parse_logs(source, created_at DESC)')
     conn.commit()

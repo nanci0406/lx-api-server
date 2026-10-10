@@ -4,7 +4,7 @@ import time
 
 from aiohttp import web
 
-from common import config
+from common import config, scheduler
 from common.services import admin_auth, module_health, stats_service, users_service
 import modules
 
@@ -195,14 +195,22 @@ def _status_badge(status):
     return f'<span class="status {html.escape(status)}">{html.escape(STATUS_LABELS.get(status, status))}</span>'
 
 
+def _strip_admin_detail(row):
+    return {k: v for k, v in row.items() if k != 'admin_detail'}
+
+
 def _public_health_rows(rows):
-    return [row for row in rows if row.get('status') != 'disabled']
+    # admin_detail 含具体账号信息，只给管理员看，公开页面不能带上
+    return [_strip_admin_detail(row) for row in rows if row.get('status') != 'disabled']
 
 
-def _render_status_cards(health_rows):
+def _render_status_cards(health_rows, show_admin_detail=False):
     status_cards = []
     for row in health_rows:
         checked = _format_checked_at(row.get('checked_at'))
+        admin_detail = ''
+        if show_admin_detail and row.get('admin_detail'):
+            admin_detail = f'<p class="module-detail small">管理员详情: {html.escape(row["admin_detail"])}</p>'
         status_cards.append(f'''
         <article class="card module-card loading-glow" data-source="{html.escape(row['source'])}">
           <div class="module-head">
@@ -213,6 +221,7 @@ def _render_status_cards(health_rows):
             {_status_badge(row['status'])}
           </div>
           <p class="module-detail">{html.escape(row.get('detail') or '')}</p>
+          {admin_detail}
           <div class="small module-time">最近检查: {html.escape(checked)}</div>
         </article>''')
     if not status_cards:
@@ -479,6 +488,8 @@ async def module_health_api(request):
     rows = module_health.get_cached_module_health()
     if request.query.get('scope') == 'public':
         rows = _public_health_rows(rows)
+    elif not admin_auth.get_session(request):
+        rows = [_strip_admin_detail(row) for row in rows]
     payload = []
     for row in rows:
         row_dict = dict(row)
@@ -758,6 +769,29 @@ async def admin_stats_page(request):
     return _admin_page('解析统计', body)
 
 
+def _render_scheduler_tasks():
+    tasks = scheduler.get_status()
+    if not tasks:
+        return '<p class="kv">当前没有已注册的定时任务。</p>'
+    rows = []
+    for task in tasks:
+        if task['running']:
+            state = '执行中'
+        elif task['consecutive_failures']:
+            state = f"连续失败 {task['consecutive_failures']} 次"
+        else:
+            state = '正常'
+        rows.append(
+            f"<tr><td>{html.escape(task['name'])}</td><td>{task['interval']}</td>"
+            f"<td>{html.escape(state)}</td>"
+            f"<td>{html.escape(_format_checked_at(task['last_success_at']))}</td>"
+            f"<td>{html.escape(_format_checked_at(task['next_run']))}</td>"
+            f"<td>{html.escape(task['last_error'] or '-')}</td></tr>")
+    return ('<table class="table"><thead><tr><th>任务</th><th>间隔(秒)</th><th>状态</th>'
+            '<th>上次成功</th><th>下次执行</th><th>最近错误</th></tr></thead><tbody>'
+            + ''.join(rows) + '</tbody></table>')
+
+
 async def admin_health_page(request):
     _require_admin(request)
     rows = module_health.get_cached_module_health()
@@ -773,7 +807,13 @@ async def admin_health_page(request):
       <p class="kv">后台会展示完整模块列表，包括首页隐藏的已关闭模块。</p>
     </section>
     <section class="card panel-accent loading-glow">
-      <div class="grid three">{_render_status_cards(rows)}</div>
+      <div class="grid three">{_render_status_cards(rows, show_admin_detail=True)}</div>
+    </section>
+    <section class="card panel-accent loading-glow">
+      <div class="eyebrow">SCHEDULER</div>
+      <h2>定时任务状态</h2>
+      <p class="kv">登录保活等定时任务。失败后会按 1 分钟、5 分钟、30 分钟、2 小时的间隔退避重试(不超过任务自身的执行间隔)。</p>
+      {_render_scheduler_tasks()}
     </section>
     '''
     return _admin_page('模块状态管理', body)
@@ -781,7 +821,7 @@ async def admin_health_page(request):
 
 async def admin_health_refresh(request):
     _require_admin(request)
-    await module_health.refresh_module_health()
+    await module_health.refresh_module_health(force=True)
     raise web.HTTPFound('/admin/health')
 
 
