@@ -91,7 +91,7 @@ async def refresh(cookie: str = None, index = None):
     )
     body = req.json()
     if int(body["code"]) != 200:
-        raise FailedException("网易云刷新登录失败(code: " + body["code"] + ")")
+        raise FailedException("网易云刷新登录失败(code: " + str(body["code"]) + ")")
     return logger.info("网易云刷新登录成功")
 
 if (variable.use_cookie_pool):
