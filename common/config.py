@@ -240,18 +240,30 @@ def push_to_list(key, obj):
 
 
 def write_config(key, value):
+    write_config_batch({key: value})
+
+
+def write_config_batch(items, sync_memory=True):
+    """
+    一次写入多个配置项(key 为点号分隔路径)：只读一次、写一次，并同步内存。
+    先写临时文件再整体替换，避免写到一半进程退出导致配置文件损坏。
+
+    sync_memory=False 时只写文件，不改动内存中的配置(用于后台"仅保存"，
+    保存后需要热重载才会生效)。
+    """
     config = None
     with open('./config/config.yml', 'r', encoding='utf-8') as f:
         config = yaml_.YAML().load(f)
 
-    keys = key.split('.')
-    current = config
-    for k in keys[:-1]:
-        if k not in current:
-            current[k] = {}
-        current = current[k]
+    for key, value in items.items():
+        keys = key.split('.')
+        current = config
+        for k in keys[:-1]:
+            if k not in current:
+                current[k] = {}
+            current = current[k]
 
-    current[keys[-1]] = value
+        current[keys[-1]] = value
 
     # 设置保留注释和空行的参数
     y = yaml_.YAML()
@@ -259,12 +271,16 @@ def write_config(key, value):
     y.preserve_blank_lines = True
 
     # 写入配置并保留注释和空行
-    with open('./config/config.yml', 'w', encoding='utf-8') as f:
+    tmp_path = './config/config.yml.tmp'
+    with open(tmp_path, 'w', encoding='utf-8') as f:
         y.dump(config, f)
+    os.replace(tmp_path, './config/config.yml')
 
     # 同步内存中的配置，否则 read_config 读到的仍是旧值
     # （例如刷新登录后新的 qqmusic_key 只写进了文件，下一轮刷新又拿旧 key 去刷）
-    _sync_memory_config(keys, value)
+    if sync_memory:
+        for key, value in items.items():
+            _sync_memory_config(key.split('.'), value)
 
 
 def _sync_memory_config(keys, value):

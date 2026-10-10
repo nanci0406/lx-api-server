@@ -78,10 +78,15 @@ CONFIG_SECTIONS = [
     },
     {
         'title': 'QQ 自动登录',
-        'description': 'QQ 音乐刷新登录任务设置，保存后会立即按最新配置重建任务。',
+        'description': 'QQ 音乐刷新登录任务设置，保存后会立即按最新配置重建任务。下面的凭证字段来自登录时返回的数据，没有可留空，刷新成功后会自动更新；手动更换 qqmusic_key 时请一并更新。',
         'fields': [
             {'key': 'module.tx.user.refresh_login.enable', 'label': '启用刷新登录', 'type': 'bool'},
             {'key': 'module.tx.user.refresh_login.interval', 'label': '刷新间隔(秒)', 'type': 'int'},
+            {'key': 'module.tx.user.refresh_key', 'label': 'refresh_key', 'type': 'text'},
+            {'key': 'module.tx.user.refresh_token', 'label': 'refresh_token', 'type': 'text'},
+            {'key': 'module.tx.user.openid', 'label': 'openid', 'type': 'text'},
+            {'key': 'module.tx.user.access_token', 'label': 'access_token', 'type': 'text'},
+            {'key': 'module.tx.user.unionid', 'label': 'unionid', 'type': 'text'},
         ],
     },
     {
@@ -593,10 +598,13 @@ async def admin_config_save(request):
         return _admin_page('配置保存结果', body)
     action = data.get('action', '').strip()
     try:
+        # 先全部解析再一次写入，某一项格式错误时不会留下写了一半的配置；
+        # 只写文件不动内存，需要"保存并热重载"后才生效
+        parsed = {}
         for field in section['fields']:
             raw_value = data.get(field['key'], '')
-            parsed_value = _parse_form_value(field, raw_value)
-            config.write_config(field['key'], parsed_value)
+            parsed[field['key']] = _parse_form_value(field, raw_value)
+        config.write_config_batch(parsed, sync_memory=False)
         if action == 'reload':
             config.hot_reload_config()
             body = f'<div class="notice">{html.escape(section_title)} 已保存并热重载。</div>'
