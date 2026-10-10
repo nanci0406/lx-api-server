@@ -1,8 +1,10 @@
+import base64
+import hashlib
+import hmac
 import os
+import secrets
 import sqlite3
 import time
-import secrets
-import hashlib
 
 from .log import log
 
@@ -17,8 +19,61 @@ def get_connection():
     return conn
 
 
+# 密码哈希：加盐 + scrypt(OpenSSL 不支持 scrypt 时退回 PBKDF2-HMAC-SHA256)。
+# 存储格式 "算法$参数...$盐(base64)$哈希(base64)"，便于以后调整参数；
+# 旧版本存的是无盐 sha256 十六进制串，仍可校验，登录成功后会自动升级。
+SCRYPT_N = 2 ** 14
+SCRYPT_R = 8
+SCRYPT_P = 1
+PBKDF2_ITERATIONS = 600000
+
+
+def _b64(data: bytes) -> str:
+    return base64.b64encode(data).decode('ascii')
+
+
 def hash_password(password: str) -> str:
-    return hashlib.sha256(password.encode('utf-8')).hexdigest()
+    salt = os.urandom(16)
+    raw = password.encode('utf-8')
+    if hasattr(hashlib, 'scrypt'):
+        try:
+            digest = hashlib.scrypt(raw, salt=salt, n=SCRYPT_N, r=SCRYPT_R, p=SCRYPT_P, dklen=32)
+            return f'scrypt${SCRYPT_N}${SCRYPT_R}${SCRYPT_P}${_b64(salt)}${_b64(digest)}'
+        except (ValueError, MemoryError):
+            pass  # 当前 OpenSSL 限制了内存，退回 PBKDF2
+    digest = hashlib.pbkdf2_hmac('sha256', raw, salt, PBKDF2_ITERATIONS, dklen=32)
+    return f'pbkdf2${PBKDF2_ITERATIONS}${_b64(salt)}${_b64(digest)}'
+
+
+def verify_password(password: str, stored: str):
+    """
+    校验密码
+
+    @return: (是否匹配, 是否需要升级哈希)
+    """
+    raw = password.encode('utf-8')
+    stored = stored or ''
+    try:
+        if stored.startswith('scrypt$'):
+            _, n, r, p, salt, digest = stored.split('$')
+            expected = base64.b64decode(digest)
+            actual = hashlib.scrypt(raw, salt=base64.b64decode(salt), n=int(n), r=int(r), p=int(p), dklen=len(expected))
+            return hmac.compare_digest(actual, expected), False
+        if stored.startswith('pbkdf2$'):
+            _, iterations, salt, digest = stored.split('$')
+            expected = base64.b64decode(digest)
+            actual = hashlib.pbkdf2_hmac('sha256', raw, base64.b64decode(salt), int(iterations), dklen=len(expected))
+            return hmac.compare_digest(actual, expected), False
+    except (ValueError, TypeError, MemoryError):
+        return False, False
+    # 旧版本：无盐 sha256
+    legacy = hashlib.sha256(raw).hexdigest()
+    try:
+        if hmac.compare_digest(legacy, stored):
+            return True, True
+    except TypeError:  # 存储值含非 ASCII 字符，必然不是旧版哈希
+        pass
+    return False, False
 
 
 def _create_tables(conn):
@@ -99,14 +154,19 @@ def _ensure_default_admin(conn):
     row = cursor.execute('SELECT COUNT(*) FROM admins').fetchone()
     if row[0] != 0:
         return
-    password = os.getenv('LX_ADMIN_PASSWORD') or secrets.token_urlsafe(10)
+    env_password = os.getenv('LX_ADMIN_PASSWORD')
+    password = env_password or secrets.token_urlsafe(10)
     username = os.getenv('LX_ADMIN_USERNAME') or 'admin'
     cursor.execute(
         'INSERT INTO admins (username, password_hash, created_at) VALUES (?, ?, ?)',
         (username, hash_password(password), int(time.time())),
     )
     conn.commit()
-    logger.warning(f'已创建默认管理员账号 {username}，密码：{password}')
+    if env_password:
+        # 密码是使用者自己指定的，不写进日志
+        logger.warning(f'已创建管理员账号 {username}，密码取自环境变量 LX_ADMIN_PASSWORD')
+    else:
+        logger.warning(f'已创建默认管理员账号 {username}，密码：{password}')
 
 
 def init_db():

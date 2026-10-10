@@ -59,6 +59,7 @@ security:
   key:
     enable: true
     ban: true
+  admin_origin_check: true # 校验后台 POST 请求的 Origin/Referer 必须与访问的 Host 一致(防 CSRF)，反向代理改写了 Host 导致后台无法操作时可关闭
   whitelist_host:
     - localhost
     - 0.0.0.0

@@ -1,6 +1,7 @@
 import html
 import json
 import time
+from urllib.parse import urlsplit
 
 from aiohttp import web
 
@@ -39,6 +40,7 @@ CONFIG_SECTIONS = [
             {'key': 'common.proxy.http_value', 'label': 'HTTP 代理', 'type': 'text'},
             {'key': 'common.proxy.https_value', 'label': 'HTTPS 代理', 'type': 'text'},
             {'key': 'security.key.enable', 'label': '启用用户 Key 鉴权', 'type': 'bool'},
+            {'key': 'security.admin_origin_check', 'label': '后台 POST 请求来源校验', 'type': 'bool'},
             {'key': 'security.check_lxm.enable', 'label': '启用 lxm 请求头校验', 'type': 'bool'},
             {'key': 'security.allowed_host.enable', 'label': '启用 Host 白名单', 'type': 'bool'},
             {'key': 'security.allowed_host.list', 'label': '允许的 Host', 'type': 'list', 'placeholder': '每行一个 host'},
@@ -174,7 +176,7 @@ def _page(title, body, extra_nav='', hero_text=None):
 
 def _admin_page(title, body, description='管理操作页。完成当前操作后返回仪表盘，再进入其他模块。'):
     return web.Response(
-        text=_page(title, body, '<a class="btn secondary" href="/admin/logout">退出</a>', description),
+        text=_page(title, body, '<form method="post" action="/admin/logout"><button class="btn secondary" type="submit">退出</button></form>', description),
         content_type='text/html',
     )
 
@@ -456,8 +458,14 @@ async def generate_download_link(request):
     source = data.get('source', '').strip()
     song_id = data.get('song_id', '').strip()
     quality = data.get('quality', '').strip()
+    limit_key = 'download-link:' + _client_ip(request)
+    if admin_auth.login_blocked(limit_key):
+        body = '<div class="notice error">验证失败次数过多，请 15 分钟后再试。</div>'
+        body += '<a class="btn secondary" href="/">返回首页</a>'
+        return web.Response(text=_page('生成下载链接失败', body), content_type='text/html', status=429)
     user = users_service.get_user_by_name_and_key(username, api_key)
     if not user:
+        admin_auth.record_login_failure(limit_key)
         body = '<div class="notice error">用户或 Key 无效。</div>'
         body += '<a class="btn secondary" href="/">返回首页</a>'
         return web.Response(text=_page('生成下载链接失败', body), content_type='text/html', status=403)
@@ -513,30 +521,80 @@ async def admin_login_page(request):
 
 
 async def admin_login(request):
+    _check_same_origin(request)
+    client_ip = _client_ip(request)
+    if admin_auth.login_blocked(client_ip):
+        body = '<div class="notice error">登录失败次数过多，请 15 分钟后再试。</div>'
+        body += '<a class="btn secondary" href="/admin/login">返回登录</a>'
+        return web.Response(text=_page('登录已被暂时限制', body), content_type='text/html', status=429)
     data = await request.post()
     username = data.get('username', '').strip()
     password = data.get('password', '').strip()
     if not admin_auth.authenticate_admin(username, password):
+        admin_auth.record_login_failure(client_ip)
         body = '<div class="notice error">管理员用户名或密码错误。</div>'
         body += '<a class="btn secondary" href="/admin/login">返回登录</a>'
         return web.Response(text=_page('管理员登录失败', body), content_type='text/html', status=403)
+    admin_auth.clear_login_failures(client_ip)
     token = admin_auth.create_session(username)
     response = web.HTTPFound('/admin')
-    response.set_cookie(admin_auth.COOKIE_NAME, token, httponly=True, samesite='Lax')
+    # 通过 HTTPS 访问(含反向代理后的 HTTPS，由 common.ssl_info.is_https 声明)时只允许在 HTTPS 下携带 Cookie
+    secure = request.secure or bool(config.read_config('common.ssl_info.is_https'))
+    response.set_cookie(admin_auth.COOKIE_NAME, token, httponly=True, samesite='Lax', secure=secure)
     raise response
 
 
 async def admin_logout(request):
+    _check_same_origin(request)
     admin_auth.destroy_session(request)
     response = web.HTTPFound('/admin/login')
     response.del_cookie(admin_auth.COOKIE_NAME)
     raise response
 
 
+async def redirect_to_admin(request):
+    # 旧版本里这些地址是带副作用的 GET 链接，现在改为 POST，旧书签访问时只做跳转
+    raise web.HTTPFound(request.path.rsplit('/', 1)[0] or '/admin')
+
+
 def _require_admin(request):
     session = admin_auth.get_session(request)
     if not session:
         raise web.HTTPFound('/admin/login')
+    return session
+
+
+def _client_ip(request):
+    # remote_addr 由 main.py 的中间件设置(已处理反向代理的真实 IP 头)
+    return getattr(request, 'remote_addr', None) or request.remote or ''
+
+
+def _check_same_origin(request):
+    """
+    校验 POST 请求来自本站页面(防 CSRF，作为 SameSite Cookie 之外的第二道防线)
+
+    浏览器的跨站请求会带上 Origin(或 Referer)，其主机必须与本站 Host 一致；
+    两者都没有时(如 curl)不拦截。若反向代理改写了 Host 导致误拦，
+    可在配置里把 security.admin_origin_check 设为 false。
+    """
+    if not config.read_config('security.admin_origin_check'):
+        return
+    source = request.headers.get('Origin') or request.headers.get('Referer')
+    if not source:
+        return
+    allowed = {request.host.lower()}
+    forwarded_host = request.headers.get('X-Forwarded-Host')
+    if forwarded_host:
+        allowed.add(forwarded_host.split(',')[0].strip().lower())
+    if urlsplit(source).netloc.lower() not in allowed:
+        raise web.HTTPForbidden(
+            text='请求来源校验失败。如果你在反向代理后访问，请确认代理传递了原始 Host，'
+                 '或将配置 security.admin_origin_check 设为 false。')
+
+
+def _require_admin_post(request):
+    session = _require_admin(request)
+    _check_same_origin(request)
     return session
 
 
@@ -589,7 +647,7 @@ async def admin_config_page(request):
           <div class="eyebrow">CONFIG CENTER</div>
           <h2>分组配置管理</h2>
         </div>
-        <div class="actions"><a class="btn" href="/admin/config/reload">仅热重载</a><a class="btn secondary" href="/admin">返回仪表盘</a></div>
+        <div class="actions"><form method="post" action="/admin/config/reload"><button class="btn" type="submit">仅热重载</button></form><a class="btn secondary" href="/admin">返回仪表盘</a></div>
       </div>
       <p class="kv">这里不再直接暴露整份 YAML。每个分组单独保存，减少误改概率，也更适合手机端操作。自动刷新登录类配置已经拆分到单独分组，保存后会重新注册定时任务。</p>
     </section>
@@ -599,7 +657,7 @@ async def admin_config_page(request):
 
 
 async def admin_config_save(request):
-    _require_admin(request)
+    _require_admin_post(request)
     data = await request.post()
     section_title = data.get('section_title', '')
     section = CONFIG_SECTION_MAP.get(section_title)
@@ -628,7 +686,7 @@ async def admin_config_save(request):
 
 
 async def admin_config_reload(request):
-    _require_admin(request)
+    _require_admin_post(request)
     try:
         config.hot_reload_config()
         body = '<div class="notice">配置已热重载，刷新登录类任务也已重新注册。</div>'
@@ -695,7 +753,7 @@ async def admin_users_page(request):
 
 
 async def admin_user_create(request):
-    _require_admin(request)
+    _require_admin_post(request)
     data = await request.post()
     try:
         users_service.create_user(data.get('name', '').strip(), data.get('api_key', '').strip())
@@ -707,7 +765,7 @@ async def admin_user_create(request):
 
 
 async def admin_user_delete(request):
-    _require_admin(request)
+    _require_admin_post(request)
     data = await request.post()
     users_service.delete_user(int(data.get('user_id')))
     raise web.HTTPFound('/admin/users')
@@ -802,7 +860,7 @@ async def admin_health_page(request):
           <div class="eyebrow">HEALTH MODULE</div>
           <h2>模块健康状态</h2>
         </div>
-        <div class="actions"><a class="btn" href="/admin/health/refresh">立即刷新</a><a class="btn secondary" href="/admin">返回仪表盘</a></div>
+        <div class="actions"><form method="post" action="/admin/health/refresh"><button class="btn" type="submit">立即刷新</button></form><a class="btn secondary" href="/admin">返回仪表盘</a></div>
       </div>
       <p class="kv">后台会展示完整模块列表，包括首页隐藏的已关闭模块。</p>
     </section>
@@ -820,7 +878,7 @@ async def admin_health_page(request):
 
 
 async def admin_health_refresh(request):
-    _require_admin(request)
+    _require_admin_post(request)
     await module_health.refresh_module_health(force=True)
     raise web.HTTPFound('/admin/health')
 
@@ -860,7 +918,7 @@ async def admin_admins_page(request):
 
 
 async def admin_admin_password_save(request):
-    _require_admin(request)
+    session = _require_admin_post(request)
     data = await request.post()
     new_password = data.get('new_password', '').strip()
     confirm_password = data.get('confirm_password', '').strip()
@@ -870,7 +928,11 @@ async def admin_admin_password_save(request):
             raise ValueError('管理员编号缺失')
         if new_password != confirm_password:
             raise ValueError('两次输入的密码不一致')
-        admin_auth.update_admin_password(int(admin_id), new_password)
+        updated_username = admin_auth.update_admin_password(int(admin_id), new_password)
+        # 改密码后，该管理员在其他地方的登录会话一并失效；当前会话保留
+        current_token = request.cookies.get(admin_auth.COOKIE_NAME)
+        keep_token = current_token if session['username'] == updated_username else None
+        admin_auth.destroy_other_sessions(updated_username, keep_token)
         body = '<div class="notice">管理员密码已更新。</div>'
     except Exception as e:
         body = f'<div class="notice error">保存失败: {html.escape(str(e))}</div>'
@@ -885,16 +947,19 @@ def register_routes(app):
     app.router.add_post('/download-link', generate_download_link)
     app.router.add_get('/admin/login', admin_login_page)
     app.router.add_post('/admin/login', admin_login)
-    app.router.add_get('/admin/logout', admin_logout)
+    app.router.add_post('/admin/logout', admin_logout)
+    app.router.add_get('/admin/logout', redirect_to_admin)
     app.router.add_get('/admin', admin_dashboard)
     app.router.add_get('/admin/config', admin_config_page)
     app.router.add_post('/admin/config', admin_config_save)
-    app.router.add_get('/admin/config/reload', admin_config_reload)
+    app.router.add_post('/admin/config/reload', admin_config_reload)
+    app.router.add_get('/admin/config/reload', redirect_to_admin)
     app.router.add_get('/admin/users', admin_users_page)
     app.router.add_post('/admin/users/create', admin_user_create)
     app.router.add_post('/admin/users/delete', admin_user_delete)
     app.router.add_get('/admin/stats', admin_stats_page)
     app.router.add_get('/admin/health', admin_health_page)
-    app.router.add_get('/admin/health/refresh', admin_health_refresh)
+    app.router.add_post('/admin/health/refresh', admin_health_refresh)
+    app.router.add_get('/admin/health/refresh', redirect_to_admin)
     app.router.add_get('/admin/admins', admin_admins_page)
     app.router.add_post('/admin/admins/password', admin_admin_password_save)
