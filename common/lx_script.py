@@ -71,14 +71,13 @@ async def get_script():
 async def generate_script_response(request):
     # 从请求中获取 key
     request_key = request.query.get('key')
-    logger.info(f"尝试使用 key: {request_key} 验证用户")  # 日志记录 key
 
     if not request_key:
         return {'code': 6, 'msg': 'key验证失败', 'data': None}, 403
 
     user = users_service.get_user_by_key(request_key)
     if not user:
-        logger.warning(f"未找到对应的用户，key: {request_key}")
+        logger.warning("脚本下载验证失败：未找到对应的用户或用户已禁用")
         return {'code': 6, 'msg': 'key验证失败', 'data': None}, 403
 
     db_user = user['name']

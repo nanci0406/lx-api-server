@@ -140,12 +140,11 @@ async def main(request):
 def validate_request_user(request):
     request_key = request.headers.get("X-Request-Key")
     request_user = request.headers.get("X-Request-User")
-    logger.info(f"收到验证请求 - 用户名: {request_user}, Key: {request_key}")
     if not request_key or not request_user:
         return None, web.json_response({'code': 6, 'msg': '缺少用户名或 key', 'data': None}, status=403)
     user = users_service.get_user_by_name_and_key(request_user, request_key)
     if not user:
-        logger.warning(f"用户验证失败 - 用户名: {request_user}, Key: {request_key} 不存在或不匹配")
+        logger.warning(f"用户验证失败 - 用户名: {request_user} 不存在、已禁用或 key 不匹配")
         return None, web.json_response({'code': 6, 'msg': 'key验证失败', 'data': None}, status=403)
     logger.info(f"用户验证成功 - 用户名: {request_user}")
     return user, None
