@@ -217,10 +217,12 @@ def checkcn():
 
 class ClientResponse:
     # 这个类为了方便aiohttp响应与requests响应的跨类使用，也方便序列化后缓存
-    def __init__(self, status, content, headers):
+    def __init__(self, status, content, headers, set_cookies=None):
         self.status = status
         self.content = content
         self.headers = headers
+        # headers 是普通字典，同名的多个 Set-Cookie 会被合并成一个，所以单独保留完整的列表
+        self.set_cookies = list(set_cookies or [])
         self.text = content.decode("utf-8", errors='ignore')
     
     def json(self):
@@ -231,8 +233,9 @@ async def convert_to_requests_response(aiohttp_response) -> ClientResponse:
     content = await aiohttp_response.content.read()  # 从aiohttp响应中读取字节数据
     status_code = aiohttp_response.status  # 获取状态码
     headers = dict(aiohttp_response.headers.items())  # 获取标头信息并转换为字典
-    
-    return ClientResponse(status_code, content, headers)
+    set_cookies = aiohttp_response.headers.getall('Set-Cookie', [])
+
+    return ClientResponse(status_code, content, headers, set_cookies)
 
 async def AsyncRequest(url, options = {}) -> ClientResponse:
     '''
