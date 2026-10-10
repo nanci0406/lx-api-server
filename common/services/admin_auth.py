@@ -122,15 +122,26 @@ def authenticate_admin(username: str, password: str):
         conn.close()
 
 
-def list_admins():
+def get_admin(username: str):
     conn = db.get_connection()
     try:
-        rows = conn.execute(
-            'SELECT id, username, created_at, last_login_at FROM admins ORDER BY id ASC'
-        ).fetchall()
-        return [dict(row) for row in rows]
+        row = conn.execute('SELECT id, username, created_at, last_login_at FROM admins WHERE username = ?',
+                           (username,)).fetchone()
+        return dict(row) if row else None
     finally:
         conn.close()
+
+
+def check_password(username: str, password: str) -> bool:
+    """只校验密码，不更新登录时间(用于修改密码前确认身份)"""
+    conn = db.get_connection()
+    try:
+        row = conn.execute('SELECT password_hash FROM admins WHERE username = ?', (username,)).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return False
+    return db.verify_password(password, row['password_hash'])[0]
 
 
 def update_admin_password(admin_id: int, new_password: str):

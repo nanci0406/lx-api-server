@@ -22,5 +22,4 @@ if not os.environ.get('LX_TEST_WORKDIR'):
     os.environ['LX_ADMIN_USERNAME'] = ADMIN_USERNAME
     os.environ['LX_ADMIN_PASSWORD'] = ADMIN_PASSWORD
     os.chdir(workdir)
-    os.makedirs('webui/static', exist_ok=True)  # webui 注册静态目录时要求目录存在
     atexit.register(shutil.rmtree, workdir, ignore_errors=True)

@@ -66,43 +66,6 @@ def record_parse(user, source, method, song_id, quality, success, error_message,
         conn.close()
 
 
-def get_summary():
-    conn = db.get_connection()
-    try:
-        rows = conn.execute(
-            '''SELECT username,
-                      COUNT(*) AS total,
-                      SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) AS success_count,
-                      SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) AS failure_count
-               FROM parse_logs
-               WHERE username IS NOT NULL
-               GROUP BY username
-               ORDER BY total DESC, username ASC'''
-        ).fetchall()
-        return [dict(row) for row in rows]
-    finally:
-        conn.close()
-
-
-def get_user_breakdown(username: str):
-    conn = db.get_connection()
-    try:
-        rows = conn.execute(
-            '''SELECT source,
-                      COUNT(*) AS total,
-                      SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) AS success_count,
-                      SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) AS failure_count
-               FROM parse_logs
-               WHERE username = ?
-               GROUP BY source
-               ORDER BY total DESC, source ASC''',
-            (username,),
-        ).fetchall()
-        return [dict(row) for row in rows]
-    finally:
-        conn.close()
-
-
 def get_recent_logs(limit: int = 50):
     conn = db.get_connection()
     try:
@@ -114,5 +77,67 @@ def get_recent_logs(limit: int = 50):
             (limit,),
         ).fetchall()
         return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def _filters(since=None, username=None, source=None, success=None):
+    clauses, params = [], []
+    if since is not None:
+        clauses.append('created_at >= ?')
+        params.append(int(since))
+    if username:
+        clauses.append('username = ?')
+        params.append(username)
+    if source:
+        clauses.append('source = ?')
+        params.append(source)
+    if success is not None:
+        clauses.append('success = ?')
+        params.append(1 if success else 0)
+    return (' WHERE ' + ' AND '.join(clauses)) if clauses else '', params
+
+
+def get_overview(since: int):
+    """since 时间戳之后的统计：总数/成功/失败/活跃用户、按天、按音源、按用户"""
+    where, params = _filters(since)
+    conn = db.get_connection()
+    try:
+        totals = dict(conn.execute(
+            f'''SELECT COUNT(*) AS total,
+                       COALESCE(SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END), 0) AS success,
+                       COUNT(DISTINCT username) AS users
+                FROM parse_logs{where}''', params).fetchone())
+        totals['failure'] = totals['total'] - totals['success']
+        daily = [dict(row) for row in conn.execute(
+            f'''SELECT strftime('%Y-%m-%d', created_at, 'unixepoch', 'localtime') AS day,
+                       COUNT(*) AS total,
+                       COALESCE(SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END), 0) AS success
+                FROM parse_logs{where} GROUP BY day ORDER BY day ASC''', params)]
+        by_source = [dict(row) for row in conn.execute(
+            f'''SELECT source, COUNT(*) AS total,
+                       COALESCE(SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END), 0) AS success
+                FROM parse_logs{where} GROUP BY source ORDER BY total DESC''', params)]
+        by_user = [dict(row) for row in conn.execute(
+            f'''SELECT COALESCE(username, '') AS username, COUNT(*) AS total,
+                       COALESCE(SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END), 0) AS success,
+                       MAX(created_at) AS last_at
+                FROM parse_logs{where} GROUP BY username ORDER BY total DESC LIMIT 50''', params)]
+        return {'totals': totals, 'daily': daily, 'by_source': by_source, 'by_user': by_user}
+    finally:
+        conn.close()
+
+
+def query_logs(limit=50, offset=0, username=None, source=None, success=None):
+    """分页查询解析记录，返回 (记录列表, 总数)"""
+    where, params = _filters(None, username, source, success)
+    conn = db.get_connection()
+    try:
+        total = conn.execute(f'SELECT COUNT(*) FROM parse_logs{where}', params).fetchone()[0]
+        rows = conn.execute(
+            f'''SELECT id, username, source, method, song_id, quality, success, error_message, client_ip, created_at
+                FROM parse_logs{where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?''',
+            params + [int(limit), int(offset)]).fetchall()
+        return [dict(row) for row in rows], total
     finally:
         conn.close()

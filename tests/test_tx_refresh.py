@@ -26,6 +26,7 @@ class TxRefreshTest(unittest.IsolatedAsyncioTestCase):
         variable.use_cookie_pool = False
         config.write_config_batch({
             'module.tx.user.qqmusic_key': 'W_X_OLD',
+            'module.tx.user.login_type': '',  # 按 key 前缀判断；其他测试可能留下了 login_type
             'module.tx.user.uin': '10086',
             'module.tx.user.refresh_key': 'RK1',
             'module.tx.user.refresh_token': 'RT1',

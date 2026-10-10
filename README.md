@@ -6,7 +6,7 @@
 
 - 支持酷狗、QQ 音乐、网易云音源解析（咪咕、酷我已移除）。
 - 使用 `X-Request-User` 和 `X-Request-Key` 做 API 请求鉴权。
-- 提供 Web 管理后台，可管理配置、API 用户、解析统计、模块健康状态和管理员密码。
+- 提供 Web 管理后台（同时适配电脑和手机，支持浅色/深色主题），可管理配置、API 用户、解析统计、模块状态、QQ 音乐登录和管理员账号；公开首页可查看服务状态、在线解析单曲、生成音源脚本链接。
 - 支持普通单账号模式和 cookie 池模式。
 - 支持 QQ 音乐、酷狗、网易云的自动刷新登录/保活任务。
 - 首次启动会自动生成默认配置和 SQLite 数据库。
@@ -64,11 +64,15 @@ LX_ADMIN_USERNAME=admin LX_ADMIN_PASSWORD=your-password python main.py
 
 后台包含：
 
-- 配置管理
-- API 用户管理
-- 解析统计
-- 模块健康状态
-- 管理员密码管理
+- 概览（`/admin`）：今日/近 7 天解析、成功率、趋势图、平台状态、最近解析、定时任务是否正常
+- 配置（`/admin/config`）：按分组编辑常用配置，带校验；从属项（如代理地址）在对应开关关闭时会变灰提示；密钥类字段只显示“已设置/末尾几位”。修改后点“保存并生效”即热重载，标有“需重启”的项目要重启服务。“原始配置”页可以直接编辑整个 `config.yml`（保存前自动备份为 `config/config.yml.bak`，新配置无法加载时自动恢复）
+- 用户（`/admin/users`）：新建/停用/删除用户、重置 Key、复制音源脚本链接，查看每位用户的解析次数和成功率
+- 统计（`/admin/stats`）：今天/近 7 天/近 30 天的趋势、平台分布、用户排行，解析记录可按用户/平台/结果筛选
+- 模块状态（`/admin/health`）：各平台状态、定时任务（刷新登录、签到、清理记录）的执行情况，可以立即检查、立即执行任务
+- QQ 登录（`/admin/qqlogin`）：见下文“QQ 音乐登录”
+- 账号安全（`/admin/account`）：修改管理员密码、退出其他设备上的登录
+
+后台是单页应用，前端只调用 `/api/admin/*` JSON 接口；不依赖任何外部 CDN，可以在内网离线使用。
 
 ## API 鉴权
 
@@ -180,7 +184,7 @@ scheduler loaded 2 task(s): qqmusic_refresh_login_pooled_0, parse_logs_cleanup
 
 ## 配置热重载
 
-后台保存配置并选择热重载后，会重新加载配置并重建定时任务。刷新登录任务会按最新配置重新注册，cookie 池账号会在任务执行时读取当前配置，避免继续使用启动时的旧 token/key/session。
+后台保存配置（表单或原始配置）后会立即热重载配置并重建定时任务。刷新登录任务会按最新配置重新注册，cookie 池账号会在任务执行时读取当前配置，避免继续使用启动时的旧 token/key/session。
 
 ## QQ 音乐登录
 
@@ -201,7 +205,7 @@ scheduler loaded 2 task(s): qqmusic_refresh_login_pooled_0, parse_logs_cleanup
 
 ## 模块状态
 
-后台“模块状态”除了检查平台域名是否可达、必填配置是否齐全之外，还会反映登录保活任务是否在连续失败，以及 QQ 音乐账号的登录凭证是否已经失效（检查结果缓存 30 分钟，点击“立即刷新”会重新检查）。公开首页上只显示笼统状态，具体的任务名、账号信息只有登录后台的管理员能看到。
+后台“模块状态”除了检查平台域名是否可达、必填配置是否齐全之外，还会反映登录保活任务是否在连续失败，以及 QQ 音乐账号的登录凭证是否已经失效（检查结果缓存 30 分钟，点击“立即检查”会重新检查）。公开首页上只显示笼统状态，具体的任务名、账号信息只有登录后台的管理员能看到。
 
 ## 数据库说明
 
@@ -223,8 +227,9 @@ scheduler loaded 2 task(s): qqmusic_refresh_login_pooled_0, parse_logs_cleanup
 
 - 部署后请立即修改管理员密码（至少 8 位）。管理员密码使用加盐的 scrypt 保存，旧版本的 sha256 密码会在下次登录成功时自动升级；改密码后该管理员的其他登录会话会失效。
 - 后台登录同一 IP 15 分钟内失败 5 次会被暂时限制；后台会话 4 小时无操作或登录满 24 小时后需要重新登录。
-- 后台的退出、热重载、刷新等操作都是 POST 请求，并且会校验请求的 `Origin`/`Referer` 与访问的 Host 一致。如果你的反向代理改写了 Host，导致后台操作提示“请求来源校验失败”，请让代理透传原始 Host（或设置 `X-Forwarded-Host`），或把配置 `security.admin_origin_check` 设为 `false`。
+- 后台的所有修改操作都通过 JSON 接口完成（POST/PUT/PATCH/DELETE，必须是 `application/json` 请求体），会校验请求的 `Origin`/`Referer` 与访问的 Host 一致，后台 Cookie 为 `HttpOnly` + `SameSite=Strict`；页面带有严格的 CSP（不允许内联脚本和样式）。如果你的反向代理改写了 Host，导致后台操作提示“请求来源校验失败”，请让代理透传原始 Host（或设置 `X-Forwarded-Host`），或把配置 `security.admin_origin_check` 设为 `false`。
 - 通过 HTTPS 反向代理访问时，请把 `common.ssl_info.is_https` 设为 `true`，后台 Cookie 才会带上 `Secure` 标记。
+- `security.rate_limit` 的限速只作用于解析接口（含首页的在线解析），后台页面、静态文件和后台接口不受限速影响，否则打开一个页面就会因为同时加载多个文件而被限速。
 - API Key 不会再写入日志。
 - 不要公开真实 API Key、平台 cookie、token、session。
 - 生产环境建议放在 HTTPS 反向代理后。

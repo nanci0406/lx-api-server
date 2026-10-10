@@ -70,6 +70,11 @@ def start_checkcn_thread() -> None:
 # check request info before start
 
 
+def _is_webui_request(path):
+    """Web 界面的页面、静态文件和后台接口(首页的在线解析仍然算作解析请求，照常限速)"""
+    return path == '/' or path.startswith(('/static/', '/admin', '/api/admin/', '/api/public/status'))
+
+
 async def handle_before_request(app, handler):
     async def handle_request(request):
         try:
@@ -84,22 +89,25 @@ async def handle_before_request(app, handler):
             # check ip
             if (config.check_ip_banned(request.remote_addr)):
                 return handleResult({"code": 1, "msg": "您的IP已被封禁", "data": None}, 403)
-            # check global rate limit
-            if (
-                (time.time() - config.getRequestTime('global'))
-                <
-                (config.read_config("security.rate_limit.global"))
-            ):
-                return handleResult({"code": 5, "msg": "全局限速", "data": None}, 429)
-            if (
-                (time.time() - config.getRequestTime(request.remote_addr))
-                <
-                (config.read_config("security.rate_limit.ip"))
-            ):
-                return handleResult({"code": 5, "msg": "IP限速", "data": None}, 429)
-            # update request time
-            config.updateRequestTime('global')
-            config.updateRequestTime(request.remote_addr)
+            # 限速只针对解析接口：Web 界面打开一次页面就要加载多个静态文件、调用多个接口，
+            # 按"两次请求最小间隔"限速会让后台和首页无法正常使用
+            if not _is_webui_request(request.path):
+                # check global rate limit
+                if (
+                    (time.time() - config.getRequestTime('global'))
+                    <
+                    (config.read_config("security.rate_limit.global"))
+                ):
+                    return handleResult({"code": 5, "msg": "全局限速", "data": None}, 429)
+                if (
+                    (time.time() - config.getRequestTime(request.remote_addr))
+                    <
+                    (config.read_config("security.rate_limit.ip"))
+                ):
+                    return handleResult({"code": 5, "msg": "IP限速", "data": None}, 429)
+                # update request time
+                config.updateRequestTime('global')
+                config.updateRequestTime(request.remote_addr)
             # check host
             if (config.read_config("security.allowed_host.enable")):
                 if request.host.split(":")[0] not in config.read_config("security.allowed_host.list"):
@@ -187,10 +195,12 @@ async def handle(request):
             }, 404)
         if (method in dir(modules)):
             result = await getattr(modules, method)(source, songId, quality, query)
-            await stats_service.record_parse_async(current_user, source, method, songId, quality, True, None, request.remote_addr)
-            return handleResult(result)
-        result = await modules.other(method, source, songId, quality, query)
-        await stats_service.record_parse_async(current_user, source, method, songId, quality, True, None, request.remote_addr)
+        else:
+            result = await modules.other(method, source, songId, quality, query)
+        # 模块用 code 表示结果(如获取失败时返回 code 2 和原因)，不能只要没抛异常就记为成功
+        success = isinstance(result, dict) and result.get('code') == 0
+        error = None if success else str((result.get('msg') if isinstance(result, dict) else None) or '解析失败')
+        await stats_service.record_parse_async(current_user, source, method, songId, quality, success, error, request.remote_addr)
         return handleResult(result)
     except Exception as e:
         await stats_service.record_parse_async(current_user, source, method, songId, quality, False, str(e), request.remote_addr)

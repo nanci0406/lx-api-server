@@ -131,6 +131,16 @@ def get_status():
         'consecutive_failures': t.state.consecutive_failures,
     } for t in tasks]
 
+def run_now(name):
+    """让已注册的任务在下一轮(约 1 秒内)立即执行；任务不存在或正在执行时返回 False"""
+    for t in tasks:
+        if t.name == name:
+            if t.state.running:
+                return False
+            t.state.next_run = 0
+            return True
+    return False
+
 def _spawn(wrapper):
     task = asyncio.ensure_future(wrapper.run())
     _running_tasks.add(task)

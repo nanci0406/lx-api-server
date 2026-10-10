@@ -125,6 +125,20 @@ class ApiHandlerTest(unittest.IsolatedAsyncioTestCase):
 
         users_service.delete_user(user['id'])
 
+    async def test_module_error_results_are_recorded_as_failures(self):
+        users_service.create_user('result-user', 'result-key-123')
+        self.addCleanup(lambda: [users_service.delete_user(u['id']) for u in users_service.list_users()
+                                 if u['name'] == 'result-user'])
+        config.write_config('module.tx.enable', True)
+        headers = {'X-Request-User': 'result-user', 'X-Request-Key': 'result-key-123'}
+        results = [{'code': 2, 'msg': '无版权', 'data': None}, {'code': 0, 'msg': 'success', 'data': 'https://x/a.mp3'}]
+        with mock.patch.object(modules, 'url', new=mock.AsyncMock(side_effect=results)):
+            await self.client.get('/url/tx/result1/128k', headers=headers)
+            await self.client.get('/url/tx/result2/128k', headers=headers)
+        rows = [r for r in stats_service.get_recent_logs(100) if r['username'] == 'result-user']
+        self.assertEqual(sorted((r['song_id'], r['success'], r['error_message']) for r in rows),
+                         [('result1', 0, '无版权'), ('result2', 1, None)])
+
 
 if __name__ == '__main__':
     unittest.main()

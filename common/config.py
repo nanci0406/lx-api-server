@@ -379,8 +379,10 @@ def read_config_text():
 
 
 def write_config_text(content):
-    with open('./config/config.yml', 'w', encoding='utf-8') as f:
+    tmp_path = './config/config.yml.tmp'
+    with open(tmp_path, 'w', encoding='utf-8') as f:
         f.write(content)
+    os.replace(tmp_path, './config/config.yml')
     hot_reload_config()
     return read_config_text()
 
