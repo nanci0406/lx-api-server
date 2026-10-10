@@ -1,6 +1,44 @@
 import time
 
-from common import db
+from common import config, db, log, scheduler
+
+logger = log.log('stats_service')
+
+
+async def record_parse_async(*args):
+    """在线程池里写入解析记录；统计写失败不能影响接口本身的返回"""
+    try:
+        await db.run_in_db_thread(record_parse, *args)
+    except Exception as e:
+        logger.warning(f'写入解析统计失败: {e}')
+
+
+def cleanup_old_logs(retention_days: int) -> int:
+    """删除 retention_days 天之前的解析记录，返回删除条数"""
+    cutoff = int(time.time()) - int(retention_days) * 86400
+    conn = db.get_connection()
+    try:
+        cursor = conn.execute('DELETE FROM parse_logs WHERE created_at < ?', (cutoff,))
+        conn.commit()
+        return cursor.rowcount
+    finally:
+        conn.close()
+
+
+async def cleanup_task():
+    days = config.read_config('common.parse_log_retention_days')
+    if not days or int(days) <= 0:
+        return
+    deleted = await db.run_in_db_thread(cleanup_old_logs, days)
+    if deleted:
+        logger.info(f'已清理 {deleted} 条超过 {days} 天的解析记录')
+
+
+def register_tasks():
+    """注册解析记录定时清理任务(每天一次)；保留天数为 0 或负数表示不清理"""
+    days = config.read_config('common.parse_log_retention_days')
+    if days and int(days) > 0:
+        scheduler.append('parse_logs_cleanup', cleanup_task, 86400)
 
 
 def record_parse(user, source, method, song_id, quality, success, error_message, client_ip):

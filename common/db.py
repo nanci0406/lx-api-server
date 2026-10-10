@@ -1,10 +1,13 @@
+import asyncio
 import base64
+import functools
 import hashlib
 import hmac
 import os
 import secrets
 import sqlite3
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from .log import log
 
@@ -13,8 +16,18 @@ logger = log('app_db')
 DB_PATH = './app.db'
 
 
+# app.db 的读写在请求路径上(鉴权、解析统计)，放到专用线程里执行以免阻塞事件循环；
+# 只用 1 个线程，让写操作串行，避免互相争抢 sqlite 的写锁。
+_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='app-db')
+
+
+async def run_in_db_thread(func, *args):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_executor, functools.partial(func, *args))
+
+
 def get_connection():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -172,6 +185,8 @@ def _ensure_default_admin(conn):
 def init_db():
     conn = get_connection()
     try:
+        # WAL 模式下读写互不阻塞，适合"请求线程写统计、后台页面读统计"的使用方式
+        conn.execute('PRAGMA journal_mode=WAL')
         _create_tables(conn)
         _migrate_legacy_users(conn)
         _ensure_default_admin(conn)

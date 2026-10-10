@@ -21,6 +21,7 @@ common:
     real_ip_header: X-Real-IP # 反代来源ip的来源头，不懂请保持默认
   debug_mode: false # 是否开启调试模式
   log_length_limit: 500 # 单条日志长度限制
+  parse_log_retention_days: 30 # 后台"解析统计"里解析记录的保留天数，超期记录每天自动清理，0 表示不清理
   fakeip: 1.0.1.114 # 服务器在海外时的IP伪装值
   proxy: # 代理配置，HTTP与HTTPS协议需分开配置
     enable: false

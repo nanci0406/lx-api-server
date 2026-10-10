@@ -356,6 +356,9 @@ def restart_scheduler_tasks():
         register_tasks = getattr(module, 'register_tasks', None)
         if callable(register_tasks):
             register_tasks()
+    # 解析记录定时清理(不属于某个音源，单独注册)
+    from .services import stats_service
+    stats_service.register_tasks()
     logger.info('定时任务已按最新配置重新注册')
 
 
@@ -569,11 +572,11 @@ value TEXT)''')
     banlist = read_data('banList')
     banlistRaw = read_data('banListRaw')
     count = 0
-    for b in banlist:
+    for b in list(banlist):  # 遍历副本，避免边遍历边删除漏掉元素
         if (b['expire'] and (time.time() > b['expire_time'])):
             count += 1
             banlist.remove(b)
-            if (b['ip'] in banlistRaw):
+            if (b['ip'] in banlistRaw and not any(x['ip'] == b['ip'] for x in banlist)):
                 banlistRaw.remove(b['ip'])
     write_data('banList', banlist)
     write_data('banListRaw', banlistRaw)
@@ -590,12 +593,24 @@ value TEXT)''')
 
 
 def ban_ip(ip_addr, ban_time=-1):
+    """
+    封禁 IP
+
+    @param ban_time: 封禁时长(秒)，-1 表示使用配置里的 security.banlist.expire.length；
+                     时长 <= 0 或关闭了 security.banlist.expire.enable 时为永久封禁
+    """
     if read_config('security.banlist.enable'):
+        length = read_config('security.banlist.expire.length') if (ban_time == -1) else ban_time
+        length = int(length or 0)
+        expire = bool(read_config('security.banlist.expire.enable')) and length > 0
         banList = read_data('banList')
+        # 同一个 IP 只保留最新的一条封禁记录
+        banList = [b for b in banList if b['ip'] != ip_addr]
         banList.append({
             'ip': ip_addr,
-            'expire': read_config('security.banlist.expire.enable'),
-            'expire_time': read_config('security.banlist.expire.length') if (ban_time == -1) else ban_time,
+            'expire': expire,
+            # 存的是到期的时间戳，不是时长
+            'expire_time': int(time.time()) + length if expire else 0,
         })
         write_data('banList', banList)
         banListRaw = read_data('banListRaw')
@@ -612,25 +627,25 @@ def check_ip_banned(ip_addr):
     if read_config('security.banlist.enable'):
         banList = read_data('banList')
         banlistRaw = read_data('banListRaw')
-        if (ip_addr in banlistRaw):
-            for b in banList:
-                if (b['ip'] == ip_addr):
-                    if (b['expire']):
-                        if (b['expire_time'] > int(time.time())):
-                            return True
-                        else:
-                            banList.remove(b)
-                            banlistRaw.remove(b['ip'])
-                            write_data('banListRaw', banlistRaw)
-                            write_data('banList', banList)
-                            return False
-                    else:
-                        return True
-                else:
-                    return False
+        if (ip_addr not in banlistRaw):
             return False
-        else:
-            return False
+        banned = False
+        changed = False
+        for b in list(banList):
+            if (b['ip'] != ip_addr):
+                continue
+            if (not b['expire'] or b['expire_time'] > int(time.time())):
+                banned = True
+            else:
+                # 已过期，移除这条记录
+                banList.remove(b)
+                changed = True
+        if changed:
+            if (not any(b['ip'] == ip_addr for b in banList) and ip_addr in banlistRaw):
+                banlistRaw.remove(ip_addr)
+            write_data('banListRaw', banlistRaw)
+            write_data('banList', banList)
+        return banned
     else:
         if (variable.banList_suggest <= 10):
             variable.banList_suggest += 1

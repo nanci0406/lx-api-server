@@ -19,7 +19,6 @@ from aiohttp.web import Response, FileResponse, StreamResponse, Application
 from io import TextIOWrapper
 import sys
 import os
-import logging
 from aiohttp import web
 
 if sys.version_info < (3, 6):
@@ -137,26 +136,19 @@ async def main(request):
     return handleResult({"code": 0, "msg": "success", "data": None})
 
 
-def validate_request_user(request):
+async def validate_request_user(request):
     request_key = request.headers.get("X-Request-Key")
     request_user = request.headers.get("X-Request-User")
     if not request_key or not request_user:
         return None, web.json_response({'code': 6, 'msg': '缺少用户名或 key', 'data': None}, status=403)
-    user = users_service.get_user_by_name_and_key(request_user, request_key)
+    # 查询并更新 last_used_at 会读写 sqlite，放到线程池里，不阻塞事件循环
+    user = await db.run_in_db_thread(users_service.get_user_by_name_and_key, request_user, request_key)
     if not user:
         logger.warning(f"用户验证失败 - 用户名: {request_user} 不存在、已禁用或 key 不匹配")
         return None, web.json_response({'code': 6, 'msg': 'key验证失败', 'data': None}, status=403)
     logger.info(f"用户验证成功 - 用户名: {request_user}")
     return user, None
 
-
-# 配置日志
-logger = logging.getLogger("main")
-logger.setLevel(logging.INFO)
-handler = logging.StreamHandler()
-formatter = logging.Formatter('%(asctime)s|[%(name)s/%(levelname)s]|%(message)s')
-handler.setFormatter(formatter)
-logger.addHandler(handler)
 
 async def handle(request):
     method = request.match_info.get('method')
@@ -167,7 +159,7 @@ async def handle(request):
     key_enable = config.read_config("security.key.enable")
     current_user = None
     if key_enable:
-        current_user, auth_error = validate_request_user(request)
+        current_user, auth_error = await validate_request_user(request)
         if auth_error:
             return auth_error
 
@@ -183,7 +175,7 @@ async def handle(request):
         if (method in dir(modules)):
             source_enable = config.read_config(f'module.{source}.enable')
             if not source_enable:
-                stats_service.record_parse(current_user, source, method, songId, quality, False, '此平台已停止服务', request.remote_addr)
+                await stats_service.record_parse_async(current_user, source, method, songId, quality, False, '此平台已停止服务', request.remote_addr)
                 return handleResult({
                     'code': 4,
                     'msg': '此平台已停止服务',
@@ -191,13 +183,13 @@ async def handle(request):
                     "Your IP": request.remote_addr
                 }, 404)
             result = await getattr(modules, method)(source, songId, quality, query)
-            stats_service.record_parse(current_user, source, method, songId, quality, True, None, request.remote_addr)
+            await stats_service.record_parse_async(current_user, source, method, songId, quality, True, None, request.remote_addr)
             return handleResult(result)
         result = await modules.other(method, source, songId, quality, query)
-        stats_service.record_parse(current_user, source, method, songId, quality, True, None, request.remote_addr)
+        await stats_service.record_parse_async(current_user, source, method, songId, quality, True, None, request.remote_addr)
         return handleResult(result)
     except Exception as e:
-        stats_service.record_parse(current_user, source, method, songId, quality, False, str(e), request.remote_addr)
+        await stats_service.record_parse_async(current_user, source, method, songId, quality, False, str(e), request.remote_addr)
         logger.error(traceback.format_exc())
         return handleResult({'code': 4, 'msg': '内部服务器错误', 'data': None}, 500)
 
@@ -284,11 +276,12 @@ async def run_app_host(host):
             final_ssl_ports = []
             final_ports = []
             for p in ports:
-                if (p not in ssl_ports and f'{host}_{p}' not in variable.running_ports):
-                    final_ports.append(p)
+                if (f'{host}_{p}' in variable.running_ports):
+                    continue  # 已经监听成功的端口(重试时)不再重复绑定
+                if (p in ssl_ports):
+                    final_ssl_ports.append(p)
                 else:
-                    if (p not in variable.running_ports):
-                        final_ssl_ports.append(p)
+                    final_ports.append(p)
             # 读取证书和私钥路径
             cert_path = config.read_config('common.ssl_info.path.cert')
             privkey_path = config.read_config(
@@ -300,7 +293,7 @@ async def run_app_host(host):
 
             # 启动 HTTP 端口监听
             for port in final_ports:
-                if (port not in variable.running_ports):
+                if (f'{host}_{port}' not in variable.running_ports):
                     http_site = aiohttp.web.TCPSite(
                         http_runner, host, port)
                     await http_site.start()
@@ -324,7 +317,7 @@ async def run_app_host(host):
 
                     # 启动 HTTPS 端口监听
                     for port in ssl_ports:
-                        if (port not in variable.running_ports):
+                        if (f'{host}_{port}' not in variable.running_ports):
                             https_site = aiohttp.web.TCPSite(
                                 https_runner, host, port, ssl_context=ssl_context)
                             await https_site.start()
@@ -392,7 +385,8 @@ if __name__ == "__main__":
     except:
         logger.critical('初始化出错，请检查日志')
         logger.critical(traceback.format_exc())
-        with open('dumprecord_{}.txt'.format(int(time.time())), 'w', encoding='utf-8') as f:
+        dump_filename = 'dumprecord_{}.txt'.format(int(time.time()))
+        with open(dump_filename, 'w', encoding='utf-8') as f:
             f.write(traceback.format_exc())
             e = '\n\nGlobal variable object:\n\n'
             for k in dir(variable):
@@ -402,7 +396,7 @@ if __name__ == "__main__":
             for k in sys.modules:
                 e += (k + ' = ' + str(sys.modules[k]) + '\n') if (not k.startswith('_')) else ''
             f.write(e)
-        logger.critical('dumprecord_{}.txt 已保存至当前目录'.format(int(time.time())))
+        logger.critical('{} 已保存至当前目录'.format(dump_filename))
     finally:
         for f in variable.log_files:
             if (f and isinstance(f, TextIOWrapper)):
