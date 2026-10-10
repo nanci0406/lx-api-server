@@ -264,7 +264,8 @@ async def AsyncRequest(url, options = {}) -> ClientResponse:
         restored = _deserialize_response(cache["data"]) if cache else None
         if restored:
             logger.debug(f"请求 {url} 有可用缓存")
-            return ClientResponse(*restored)
+            status, headers, content = restored
+            return ClientResponse(status, content, headers)
     if "cache" in list(options.keys()):
         cache_info = options.get("cache")
         options.pop("cache")

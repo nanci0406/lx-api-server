@@ -620,7 +620,7 @@ async def admin_dashboard(request):
           <a class="btn" href="/admin/stats">解析统计</a>
           <a class="btn" href="/admin/health">模块状态</a>
           <a class="btn" href="/admin/admins">管理员密码</a>
-          <a class="btn secondary" href="/admin/logout">退出登录</a>
+          <form method="post" action="/admin/logout"><button class="btn secondary" type="submit">退出登录</button></form>
         </div>
       </section>
       <section class="card compact-card loading-glow">
