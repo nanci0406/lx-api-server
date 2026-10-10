@@ -44,6 +44,20 @@ class CredentialTest(unittest.IsolatedAsyncioTestCase):
             self.codes['code'] = code
             self.assertEqual(await credential.check_account(user), expected)
 
+    async def test_login_type_follows_the_same_rules_as_refresh(self):
+        import ujson
+        cases = (({'qqmusic_key': 'PHONEKEY', 'uin': '1', 'login_type': '1'}, '1'),
+                 ({'qqmusic_key': 'PHONEKEY', 'uin': '1', 'login_type': '2'}, '2'),
+                 ({'qqmusic_key': 'W_X_K', 'uin': '1', 'login_type': '2'}, '2'),  # login_type 优先于前缀
+                 ({'qqmusic_key': 'W_X_K', 'uin': '1'}, '1'),
+                 ({'qqmusic_key': 'Q_H_L_K', 'uin': '1', 'login_type': ''}, '2'),
+                 ({'qqmusic_key': 'PHONEKEY', 'uin': '1', 'login_type': '0'}, '0'),
+                 ({'qqmusic_key': 'PHONEKEY', 'uin': '1'}, '0'))
+        for user, expected in cases:
+            self.calls.clear()
+            await credential.check_account(user)
+            self.assertEqual(ujson.loads(self.calls[0])['comm']['tmeLoginType'], expected, user)
+
     async def test_results_are_cached_per_key_and_force_bypasses(self):
         self.codes['code'] = 1000
         first = await credential.check_all()

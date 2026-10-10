@@ -12,7 +12,7 @@ import hashlib
 import time
 import ujson as json
 from common import Httpx, config, variable, log
-from .utils import sign
+from .utils import sign, login_kind
 
 logger = log.log('qqmusic_credential')
 
@@ -50,8 +50,7 @@ async def check_account(user_info):
             'format': 'json',
             'qq': uin,
             'authst': key,
-            'tmeLoginType': '1' if key.startswith('W_X') else ('2' if key.startswith('Q_H_L') else
-                                                                  str(user_info.get('login_type') or '0')),
+            'tmeLoginType': {'wx': '1', 'qq': '2'}.get(login_kind(user_info), str(user_info.get('login_type') or '0')),
         },
         'req': {
             'module': 'music.UserInfo.userInfoServer',

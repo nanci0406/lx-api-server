@@ -90,6 +90,36 @@ class TxRefreshTest(unittest.IsolatedAsyncioTestCase):
         _, payload = rl._build_request({'qqmusic_key': 'OTHER', 'uin': '1', 'login_type': 3})
         self.assertEqual(payload['comm']['tmeLoginType'], '3')
 
+    def test_login_type_decides_the_request_before_the_key_prefix(self):
+        # 手机验证码登录得到的 key 前缀不确定：保存的 login_type 为 1/2 时按它选择，不看前缀
+        wx_url, wx = rl._build_request({'qqmusic_key': 'PHONEKEY', 'uin': '555', 'login_type': '1',
+                                        'refresh_key': 'RK'})
+        self.assertTrue(wx_url.startswith('https://u.y.qq.com/'))
+        self.assertEqual((wx['comm']['tmeLoginType'], wx['req1']['param']['str_musicid'],
+                          wx['req1']['param']['refresh_key']), ('1', '555', 'RK'))
+        qq_url, qq = rl._build_request({'qqmusic_key': 'PHONEKEY', 'uin': '555', 'login_type': 2})
+        self.assertTrue(qq_url.startswith('https://u6.y.qq.com/'))
+        self.assertEqual((qq['req1']['method'], qq['req1']['param']['musicid']), ('QQLogin', 555))
+
+        # 两者冲突时以 login_type 为准(它来自登录接口的返回)
+        url, payload = rl._build_request({'qqmusic_key': 'W_X_LOOKS_LIKE_WECHAT', 'uin': '5', 'login_type': '2'})
+        self.assertEqual(payload['req1']['method'], 'QQLogin')
+        url, payload = rl._build_request({'qqmusic_key': 'Q_H_L_LOOKS_LIKE_QQ', 'uin': '5', 'login_type': '1'})
+        self.assertEqual(payload['comm']['tmeLoginType'], '1')
+
+    def test_without_a_usable_login_type_the_key_prefix_is_used(self):
+        for login_type in ('', None, '0', 0, '3', 'abc'):
+            _, payload = rl._build_request({'qqmusic_key': 'W_X_KEY', 'uin': '5', 'login_type': login_type})
+            self.assertEqual(payload['req1']['method'], 'Login', login_type)
+            self.assertEqual(payload['comm']['tmeLoginType'], '1', login_type)
+            _, payload = rl._build_request({'qqmusic_key': 'Q_H_L_KEY', 'uin': '5', 'login_type': login_type})
+            self.assertEqual(payload['req1']['method'], 'QQLogin', login_type)
+
+    def test_login_type_one_or_two_still_needs_a_key(self):
+        self.assertIsNone(rl._build_request({'qqmusic_key': '', 'uin': '5', 'login_type': '1'}))
+        self.assertIsNone(rl._build_request({'qqmusic_key': '', 'uin': '5', 'login_type': '2'}))
+        self.assertIsNone(rl._build_request({'qqmusic_key': 'K', 'uin': 'abc', 'login_type': '2'}))
+
     def test_mask_hides_secrets_everywhere(self):
         masked = rl._mask({'req1': {'data': {'musickey': 'W_X_SECRETVALUE', 'refresh_token': 'abcdefgh',
                                              'nick': 'visible', 'empty': ''}}, 'list': [{'openid': 'zzzzzzz'}]})

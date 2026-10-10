@@ -11,7 +11,7 @@ from common import Httpx, variable
 from common import scheduler
 from common import config
 from common import log
-from .utils import sign
+from .utils import sign, login_kind
 import ujson as json
 
 logger = log.log('qqmusic_refresh_login')
@@ -59,14 +59,19 @@ def _account_label(user_info):
 
 def _build_request(user_info):
     """
-    根据 qqmusic_key 的前缀(微信 W_X / QQ Q_H_L)构造刷新登录请求
+    根据账号的登录类型构造刷新登录请求：优先用保存的 login_type(1 微信、2 QQ)，
+    没有时按 qqmusic_key 的前缀(微信 W_X / QQ Q_H_L)判断，都不是则走通用接口
 
-    @return: (url, payload)；key 格式未知或 uin 无效时返回 None
+    @return: (url, payload)；key 为空或 uin 无效时返回 None
     """
     key = str(user_info.get('qqmusic_key') or '')
     uin = str(user_info.get('uin') or '')
     extra = {k: str(user_info.get(k) or '') for k in EXTRA_FIELDS}
-    if key.startswith('W_X'):
+    if not key:
+        logger.error(f'{_account_label(user_info)}刷新登录失败: qqmusic_key 为空')
+        return None
+    kind = login_kind(user_info)
+    if kind == 'wx':
         return WX_LOGIN_URL, {
             'comm': {
                 'fPersonality': '0',
@@ -94,7 +99,7 @@ def _build_request(user_info):
                 },
             },
         }
-    if key.startswith('Q_H_L'):
+    if kind == 'qq':
         if not uin.isdigit():
             logger.error(f'{_account_label(user_info)}刷新登录失败: uin 必须是数字')
             return None
@@ -115,7 +120,8 @@ def _build_request(user_info):
             },
         }
     if key and uin.isdigit():
-        # 其他类型的 key(例如手机验证码登录得到的)：使用通用的刷新接口，登录类型取自登录时保存的 login_type
+        # 既没有 login_type(1/2)、key 前缀也不认识(例如手机验证码登录得到的)：
+        # 使用通用的刷新接口，登录类型取自保存的 login_type
         login_type = str(user_info.get('login_type') or '0')
         param = {
             'openid': extra['openid'],
