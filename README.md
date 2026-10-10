@@ -180,6 +180,23 @@ scheduler loaded 2 task(s): qqmusic_refresh_login_pooled_0, parse_logs_cleanup
 
 后台保存配置并选择热重载后，会重新加载配置并重建定时任务。刷新登录任务会按最新配置重新注册，cookie 池账号会在任务执行时读取当前配置，避免继续使用启动时的旧 token/key/session。
 
+## QQ 音乐登录
+
+后台“QQ 登录”页（`/admin/qqlogin`）支持三种方式登录 QQ 音乐：
+
+- QQ 扫码
+- 微信扫码
+- 手机号 + 短信验证码（可能需要先在浏览器里完成一次人机验证，页面会给出验证链接）
+
+登录成功后会拿到完整的登录凭证（`musickey`、`refresh_key`、`refresh_token`、`openid` 等），可以选择保存为主账号（`module.tx.user`）或加入 cookie 池（`module.cookiepool.tx`），并可同时开启该账号的自动刷新登录。保存后配置会自动热重载，刷新任务立即生效，不需要再手动抓包、复制 key。
+
+说明：
+
+- 登录得到的凭证只在服务端内存里保留 10 分钟，点击“保存到配置”后才会写入配置文件；状态接口不会返回凭证本身。
+- 手机号登录会用到一份模拟的安卓设备信息，保存在 `config/tx_device.json`（含向官方申请的 QIMEI，24 小时刷新一次），请不要删除或公开。
+- 暂不支持“手机 QQ 音乐客户端扫码”这种需要 MQTT 的登录方式。
+- 登录协议参考了 [YAQMC/qm-api-rs](https://github.com/YAQMC/qm-api-rs)（GPL-3.0）的文档与行为，代码是独立实现的，没有复制其源码；QIMEI/设备信息部分参考了同源项目 [MeoProject/lx-music-api-server](https://github.com/MeoProject/lx-music-api-server)（MIT）。
+
 ## 模块状态
 
 后台“模块状态”除了检查平台域名是否可达、必填配置是否齐全之外，还会反映登录保活任务是否在连续失败，以及 QQ 音乐账号的登录凭证是否已经失效（检查结果缓存 30 分钟，点击“立即刷新”会重新检查）。公开首页上只显示笼统状态，具体的任务名、账号信息只有登录后台的管理员能看到。

@@ -74,9 +74,21 @@ class TxRefreshTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('comm', payload)
 
     def test_invalid_accounts_are_rejected_without_a_request(self):
-        self.assertIsNone(rl._build_request({'qqmusic_key': 'XYZ', 'uin': '1'}))
+        self.assertIsNone(rl._build_request({'qqmusic_key': 'XYZ', 'uin': 'abc'}))
+        self.assertIsNone(rl._build_request({'qqmusic_key': '', 'uin': '1'}))
         self.assertIsNone(rl._build_request({'qqmusic_key': 'Q_H_L_X', 'uin': 'abc'}))
         self.assertIsNone(rl._build_request({'qqmusic_key': 'Q_H_L_X', 'uin': ''}))
+
+    def test_other_key_types_use_the_generic_login_request(self):
+        # 手机验证码登录得到的 key 不以 W_X / Q_H_L 开头，用保存的 login_type 走通用刷新接口
+        url, payload = rl._build_request({'qqmusic_key': 'PHONEKEY', 'uin': '555', 'login_type': '0',
+                                          'refresh_key': 'RK', 'refresh_token': 'RT'})
+        param = payload['req1']['param']
+        self.assertEqual(payload['comm']['tmeLoginType'], '0')
+        self.assertEqual((param['musickey'], param['musicid'], param['str_musicid']), ('PHONEKEY', 555, '555'))
+        self.assertEqual((param['refresh_key'], param['refresh_token'], param['loginMode']), ('RK', 'RT', 2))
+        _, payload = rl._build_request({'qqmusic_key': 'OTHER', 'uin': '1', 'login_type': 3})
+        self.assertEqual(payload['comm']['tmeLoginType'], '3')
 
     def test_mask_hides_secrets_everywhere(self):
         masked = rl._mask({'req1': {'data': {'musickey': 'W_X_SECRETVALUE', 'refresh_token': 'abcdefgh',

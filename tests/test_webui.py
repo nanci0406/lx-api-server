@@ -214,3 +214,167 @@ class WebUiTest(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# QQ 登录相关的后台接口
+# ---------------------------------------------------------------------------
+import base64  # noqa: E402
+from unittest import mock  # noqa: E402
+
+from modules.tx import login as qq_login  # noqa: E402
+
+
+class QqLoginRoutesTest(unittest.IsolatedAsyncioTestCase):
+    @classmethod
+    def setUpClass(cls):
+        db.init_db()
+
+    async def asyncSetUp(self):
+        admin_auth._login_failures.clear()
+        variable.admin_sessions.clear()
+        qq_login._sessions.clear()
+        config.write_config('security.admin_origin_check', True)
+        app = web.Application()
+        routes.register_routes(app)
+        self.client = TestClient(TestServer(app))
+        await self.client.start_server()
+        self.addAsyncCleanup(self.client.close)
+        resp = await self.client.post('/admin/login', data={'username': USERNAME, 'password': PASSWORD},
+                                      allow_redirects=False)
+        self.cookies = {admin_auth.COOKIE_NAME: resp.cookies[admin_auth.COOKIE_NAME].value}
+        self.client.session.cookie_jar.clear()
+
+    def patch(self, name, **kwargs):
+        patcher = mock.patch.object(qq_login, name, **kwargs)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def done_session(self, owner=USERNAME):
+        ls = qq_login.LoginSession('qq', owner)
+        ls.credential = qq_login.credential_from_login(
+            0, {'musickey': 'Q_H_L_ROUTE', 'musicid': 4242, 'refresh_key': 'RK'}, 2)
+        ls.finish('done', '登录成功')
+        qq_login._sessions[ls.id] = ls
+        return ls
+
+    async def test_requires_an_admin_session(self):
+        page = await self.client.get('/admin/qqlogin', allow_redirects=False)
+        self.assertEqual((page.status, page.headers['Location']), (302, '/admin/login'))
+        for method, path in (('post', '/admin/qqlogin/qr/start'), ('get', '/admin/qqlogin/status?id=x'),
+                             ('post', '/admin/qqlogin/cancel'), ('post', '/admin/qqlogin/phone/send'),
+                             ('post', '/admin/qqlogin/phone/verify'), ('post', '/admin/qqlogin/apply')):
+            resp = await getattr(self.client, method)(path, allow_redirects=False)
+            self.assertEqual(resp.status, 401, path)  # JSON 接口不能跳转到登录页，否则前端拿到的是 HTML
+            self.assertEqual((await resp.json())['code'], 401)
+
+    async def test_post_endpoints_check_the_origin(self):
+        resp = await self.client.post('/admin/qqlogin/qr/start', data={'kind': 'qq'}, cookies=self.cookies,
+                                      headers={'Origin': 'http://evil.example'})
+        self.assertEqual(resp.status, 403)
+
+    async def test_page_and_dashboard_link(self):
+        page = await (await self.client.get('/admin/qqlogin', cookies=self.cookies)).text()
+        for fragment in ('QQ 扫码', '微信扫码', '手机验证码', '/admin/qqlogin/qr/start', '/admin/qqlogin/apply'):
+            self.assertIn(fragment, page)
+        dashboard = await (await self.client.get('/admin', cookies=self.cookies)).text()
+        self.assertIn('href="/admin/qqlogin"', dashboard)
+
+    async def test_qr_start_returns_a_data_url_and_status_is_owner_bound(self):
+        async def fake_start(kind, owner):
+            ls = qq_login.LoginSession(kind, owner)
+            ls.image, ls.mimetype = b'\x89PNG-bytes', 'image/png'
+            qq_login._sessions[ls.id] = ls
+            return ls
+        self.patch('start_qr', new=fake_start)
+        resp = await self.client.post('/admin/qqlogin/qr/start', data={'kind': 'qq'}, cookies=self.cookies)
+        data = (await resp.json())['data']
+        self.assertEqual(base64.b64decode(data['image'].split(',', 1)[1]), b'\x89PNG-bytes')
+        self.assertTrue(data['image'].startswith('data:image/png;base64,'))
+
+        status = await (await self.client.get(f"/admin/qqlogin/status?id={data['id']}", cookies=self.cookies)).json()
+        self.assertEqual(status['data']['state'], 'scan')
+        qq_login._sessions[data['id']].owner = 'someone-else'
+        missing = await self.client.get(f"/admin/qqlogin/status?id={data['id']}", cookies=self.cookies)
+        self.assertEqual(missing.status, 404)
+
+    async def test_qr_start_errors_are_reported_as_json(self):
+        async def failing(kind, owner):
+            raise qq_login.LoginError('同时进行的扫码登录太多，请稍后再试')
+        self.patch('start_qr', new=failing)
+        resp = await self.client.post('/admin/qqlogin/qr/start', data={'kind': 'qq'}, cookies=self.cookies)
+        self.assertEqual(resp.status, 400)
+        self.assertEqual((await resp.json())['msg'], '同时进行的扫码登录太多，请稍后再试')
+
+    async def test_status_never_contains_the_credential(self):
+        ls = self.done_session()
+        body = await (await self.client.get(f'/admin/qqlogin/status?id={ls.id}', cookies=self.cookies)).text()
+        self.assertIn('4242', body)
+        self.assertNotIn('Q_H_L_ROUTE', body)
+        self.assertNotIn('"RK"', body)
+
+    async def test_phone_send_only_exposes_trusted_captcha_urls(self):
+        results = iter([
+            {'state': 'captcha', 'url': 'https://captcha.qq.com/x'},
+            {'state': 'captcha', 'url': 'javascript:alert(1)'},
+            {'state': 'captcha', 'url': 'https://evil.example/qq.com'},
+            {'state': 'sent'},
+        ])
+
+        async def fake_send(owner, phone, country_code='86'):
+            return dict(next(results))
+        self.patch('phone_send', new=fake_send)
+        urls = []
+        for _ in range(3):
+            resp = await self.client.post('/admin/qqlogin/phone/send', data={'phone': '13800138000'},
+                                          cookies=self.cookies)
+            urls.append((await resp.json())['data']['url'])
+        self.assertEqual(urls, ['https://captcha.qq.com/x', '', ''])
+        resp = await self.client.post('/admin/qqlogin/phone/send', data={'phone': '13800138000'}, cookies=self.cookies)
+        self.assertEqual((await resp.json())['data'], {'state': 'sent'})
+
+    async def test_phone_verify_creates_a_result_session(self):
+        async def fake_verify(owner, phone, code, country_code='86'):
+            self.assertEqual((owner, phone, code, country_code), (USERNAME, '13800138000', '123456', '86'))
+            return self.done_session(owner)
+        self.patch('phone_verify', new=fake_verify)
+        resp = await self.client.post('/admin/qqlogin/phone/verify', cookies=self.cookies, data={
+            'phone': '13800138000', 'code': '123456', 'country_code': '86'})
+        data = (await resp.json())['data']
+        self.assertEqual((data['state'], data['account']['uin']), ('done', '4242'))
+
+    async def test_apply_saves_the_credential_and_reloads_the_config(self):
+        ls = self.done_session()
+        reload_calls = []
+        with mock.patch.object(config, 'hot_reload_config', side_effect=lambda: reload_calls.append(1)):
+            resp = await self.client.post('/admin/qqlogin/apply', cookies=self.cookies, data={
+                'id': ls.id, 'target': 'main', 'enable_refresh': '1'})
+        self.assertEqual(resp.status, 200)
+        self.assertIn('主账号', (await resp.json())['data']['note'])
+        self.assertEqual(config.read_config('module.tx.user.qqmusic_key'), 'Q_H_L_ROUTE')
+        self.assertEqual(config.read_config('module.tx.user.uin'), '4242')
+        self.assertTrue(config.read_config('module.tx.user.refresh_login.enable'))
+        self.assertEqual(reload_calls, [1])
+        # 凭证已写入配置，会话里不再保留，也不能重复保存
+        again = await self.client.post('/admin/qqlogin/apply', cookies=self.cookies, data={
+            'id': ls.id, 'target': 'main', 'enable_refresh': '1'})
+        self.assertEqual(again.status, 400)
+
+    async def test_apply_validates_session_owner_and_target(self):
+        ls = self.done_session()
+        bad_target = await self.client.post('/admin/qqlogin/apply', cookies=self.cookies, data={
+            'id': ls.id, 'target': 'nowhere'})
+        self.assertEqual(bad_target.status, 400)
+        ls.owner = 'someone-else'
+        foreign = await self.client.post('/admin/qqlogin/apply', cookies=self.cookies, data={
+            'id': ls.id, 'target': 'main'})
+        self.assertEqual(foreign.status, 404)
+        unknown = await self.client.post('/admin/qqlogin/apply', cookies=self.cookies, data={'id': 'nope'})
+        self.assertEqual(unknown.status, 404)
+
+    async def test_cancel_endpoint(self):
+        ls = qq_login.LoginSession('qq', USERNAME)
+        qq_login._sessions[ls.id] = ls
+        resp = await self.client.post('/admin/qqlogin/cancel', cookies=self.cookies, data={'id': ls.id})
+        self.assertEqual((await resp.json())['code'], 0)
+        self.assertEqual(ls.state, 'cancelled')

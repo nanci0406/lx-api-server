@@ -1,3 +1,4 @@
+import base64
 import html
 import json
 import time
@@ -8,6 +9,7 @@ from aiohttp import web
 from common import config, scheduler
 from common.services import admin_auth, module_health, stats_service, users_service
 import modules
+from modules.tx import login as qq_login
 
 
 STATUS_LABELS = {
@@ -590,6 +592,7 @@ async def admin_dashboard(request):
           <a class="btn" href="/admin/users">用户管理</a>
           <a class="btn" href="/admin/stats">解析统计</a>
           <a class="btn" href="/admin/health">模块状态</a>
+          <a class="btn" href="/admin/qqlogin">QQ 登录</a>
           <a class="btn" href="/admin/admins">管理员密码</a>
           <form method="post" action="/admin/logout"><button class="btn secondary" type="submit">退出登录</button></form>
         </div>
@@ -911,6 +914,265 @@ async def admin_admin_password_save(request):
     return _admin_page('管理员密码更新结果', body)
 
 
+# ---------------------------------------------------------------------------
+# QQ 音乐登录(扫码 / 手机验证码)
+# ---------------------------------------------------------------------------
+
+def _api_admin(request, post=False):
+    """给 JSON 接口用的管理员校验：未登录时返回 401 JSON，而不是跳转到登录页"""
+    session = admin_auth.get_session(request)
+    if not session:
+        raise web.HTTPUnauthorized(
+            text=json.dumps({'code': 401, 'msg': '登录已过期，请刷新页面重新登录', 'data': None}, ensure_ascii=False),
+            content_type='application/json')
+    if post:
+        _check_same_origin(request)
+    return session
+
+
+def _json_error(message, status=400):
+    return web.json_response({'code': 1, 'msg': message, 'data': None}, status=status)
+
+
+def _safe_security_url(url):
+    """人机验证地址来自服务端响应，只放行 QQ/腾讯域名下的 https 地址"""
+    parts = urlsplit(url or '')
+    host = (parts.hostname or '').lower()
+    if parts.scheme == 'https' and any(host == d or host.endswith('.' + d) for d in ('qq.com', 'tencent.com')):
+        return url
+    return ''
+
+
+async def admin_qqlogin_page(request):
+    _require_admin(request)
+    body = """
+    <section class="card panel-accent page-lead loading-glow">
+      <div class="panel-top">
+        <div>
+          <div class="eyebrow">QQ MUSIC LOGIN</div>
+          <h2>QQ 音乐登录</h2>
+        </div>
+        <a class="btn secondary" href="/admin">返回仪表盘</a>
+      </div>
+      <p class="kv">用 QQ、微信扫码或手机验证码登录 QQ 音乐，登录成功后会拿到完整的登录凭证（含 refresh_key 等），
+      保存后自动刷新登录就能长期续期，不需要再手动抓包。凭证只在内存里短暂保留，点击“保存到配置”后写入配置文件。</p>
+    </section>
+    <div class="grid two admin-grid">
+      <section class="card loading-glow">
+        <div class="eyebrow">LOGIN</div>
+        <h2>选择登录方式</h2>
+        <div class="actions">
+          <button type="button" id="btn-qq">QQ 扫码</button>
+          <button type="button" id="btn-wx" class="secondary">微信扫码</button>
+          <button type="button" id="btn-phone" class="secondary">手机验证码</button>
+        </div>
+        <div id="qr-box" hidden style="margin-top:16px;">
+          <img id="qr-image" alt="登录二维码" style="width:220px;height:220px;background:#fff;padding:8px;border-radius:8px;">
+          <p class="kv" id="qr-hint"></p>
+          <button type="button" id="btn-cancel" class="secondary">取消</button>
+        </div>
+        <form id="phone-box" hidden style="margin-top:16px;" onsubmit="return false;">
+          <div class="row"><label>区号</label><input id="phone-country" value="86" inputmode="numeric" autocomplete="off"></div>
+          <div class="row"><label>手机号</label><input id="phone-number" inputmode="numeric" autocomplete="off"></div>
+          <div class="row"><label>验证码</label><input id="phone-code" inputmode="numeric" autocomplete="off"></div>
+          <div class="actions">
+            <button type="button" id="btn-send">发送验证码</button>
+            <button type="button" id="btn-verify" class="secondary">登录</button>
+          </div>
+          <p class="kv" id="phone-hint"></p>
+        </form>
+        <p class="kv" id="status-text" role="status"></p>
+      </section>
+      <section class="card loading-glow" id="result-box" hidden>
+        <div class="eyebrow">RESULT</div>
+        <h2>登录成功</h2>
+        <p class="kv" id="result-account"></p>
+        <p class="kv" id="result-warning" hidden></p>
+        <form id="apply-form" onsubmit="return false;">
+          <div class="row"><label>保存位置</label>
+            <select id="apply-target">
+              <option value="main">主账号 (module.tx.user)</option>
+              <option value="pool">加入 cookie 池 (module.cookiepool.tx)</option>
+            </select>
+          </div>
+          <div class="row"><label><input type="checkbox" id="apply-refresh" checked style="width:auto;margin-right:6px"> 同时开启自动刷新登录</label></div>
+          <button type="button" id="btn-apply">保存到配置</button>
+        </form>
+        <p class="kv" id="apply-text" role="status"></p>
+      </section>
+    </div>
+    <script>
+    (function () {
+      var $ = function (id) { return document.getElementById(id); };
+      var sessionId = null, timer = null;
+
+      function post(url, params) {
+        return fetch(url, {method: 'POST', body: new URLSearchParams(params || {}), credentials: 'same-origin'})
+          .then(function (res) {
+            return res.json().catch(function () { throw new Error('请求失败(HTTP ' + res.status + ')，请刷新页面后重试'); })
+              .then(function (json) { if (json.code !== 0) throw new Error(json.msg || '请求失败'); return json.data; });
+          });
+      }
+      function status(text) { $('status-text').textContent = text || ''; }
+      function stopPolling() { if (timer) { clearInterval(timer); timer = null; } }
+      function reset() {
+        stopPolling(); sessionId = null;
+        $('qr-box').hidden = true; $('phone-box').hidden = true; $('result-box').hidden = true;
+        $('apply-text').textContent = ''; status('');
+      }
+      function showResult(info) {
+        stopPolling();
+        $('qr-box').hidden = true;
+        var account = info.account || {};
+        $('result-account').textContent = '账号: ' + (account.uin || '') + (account.nick ? ' (' + account.nick + ')' : '');
+        var warning = $('result-warning');
+        warning.hidden = account.has_refresh;
+        warning.textContent = account.has_refresh ? '' : '这次登录没有返回 refresh 凭证，自动刷新登录可能无法续期。';
+        $('result-box').hidden = false;
+        status('登录成功，请在右侧选择保存位置。');
+      }
+      var STATE_TEXT = {scan: '请使用手机扫描二维码', conf: '已扫码，请在手机上确认登录',
+                        timeout: '二维码已失效，请重新获取', refuse: '你已在手机上拒绝了登录',
+                        cancelled: '已取消'};
+      function poll() {
+        if (!sessionId) { return; }
+        fetch('/admin/qqlogin/status?id=' + encodeURIComponent(sessionId), {credentials: 'same-origin'})
+          .then(function (res) { return res.json(); })
+          .then(function (json) {
+            if (json.code !== 0) { throw new Error(json.msg || '查询失败'); }
+            var info = json.data;
+            if (info.state === 'done') { showResult(info); return; }
+            if (info.state === 'error') { stopPolling(); status(info.message || '登录失败'); return; }
+            status(STATE_TEXT[info.state] || info.state);
+            if (info.state !== 'scan' && info.state !== 'conf') { stopPolling(); }
+          })
+          .catch(function (e) { stopPolling(); status(e.message); });
+      }
+      function startQr(kind) {
+        reset(); status('正在获取二维码...');
+        post('/admin/qqlogin/qr/start', {kind: kind}).then(function (data) {
+          sessionId = data.id;
+          $('qr-image').src = data.image;
+          $('qr-hint').textContent = kind === 'qq' ? '用手机 QQ 扫码并确认' : '用微信扫码并确认';
+          $('qr-box').hidden = false; status(STATE_TEXT.scan);
+          timer = setInterval(poll, 2000);
+        }).catch(function (e) { status(e.message); });
+      }
+      $('btn-qq').onclick = function () { startQr('qq'); };
+      $('btn-wx').onclick = function () { startQr('wx'); };
+      $('btn-phone').onclick = function () { reset(); $('phone-box').hidden = false; $('phone-hint').textContent = ''; };
+      $('btn-cancel').onclick = function () {
+        var id = sessionId; reset();
+        if (id) { post('/admin/qqlogin/cancel', {id: id}).catch(function () {}); }
+      };
+      $('btn-send').onclick = function () {
+        $('phone-hint').textContent = '正在发送...';
+        post('/admin/qqlogin/phone/send', {phone: $('phone-number').value, country_code: $('phone-country').value})
+          .then(function (data) {
+            var hint = $('phone-hint');
+            hint.textContent = '';
+            if (data.state === 'sent') { hint.textContent = '验证码已发送，请查收短信。'; }
+            else if (data.state === 'frequency') { hint.textContent = '发送太频繁，请稍后再试。'; }
+            else if (data.state === 'captcha') {
+              hint.textContent = '需要先完成人机验证。';
+              if (data.url) {
+                var link = document.createElement('a');
+                link.href = data.url; link.target = '_blank'; link.rel = 'noopener noreferrer';
+                link.textContent = '点此完成验证'; hint.appendChild(link);
+                hint.appendChild(document.createTextNode('，完成后再点一次“发送验证码”。'));
+              }
+            }
+          }).catch(function (e) { $('phone-hint').textContent = e.message; });
+      };
+      $('btn-verify').onclick = function () {
+        $('phone-hint').textContent = '正在登录...';
+        post('/admin/qqlogin/phone/verify', {phone: $('phone-number').value, country_code: $('phone-country').value,
+                                             code: $('phone-code').value})
+          .then(function (info) { sessionId = info.id; $('phone-box').hidden = true; showResult(info); })
+          .catch(function (e) { $('phone-hint').textContent = e.message; });
+      };
+      $('btn-apply').onclick = function () {
+        $('apply-text').textContent = '正在保存...';
+        post('/admin/qqlogin/apply', {id: sessionId, target: $('apply-target').value,
+                                      enable_refresh: $('apply-refresh').checked ? '1' : '0'})
+          .then(function (data) {
+            $('apply-text').textContent = data.note;
+            $('btn-apply').disabled = true; sessionId = null;
+          }).catch(function (e) { $('apply-text').textContent = e.message; });
+      };
+    })();
+    </script>
+    """
+    return _admin_page('QQ 登录', body)
+
+
+async def admin_qqlogin_qr_start(request):
+    session = _api_admin(request, post=True)
+    data = await request.post()
+    try:
+        ls = await qq_login.start_qr(data.get('kind', ''), session['username'])
+    except qq_login.LoginError as e:
+        return _json_error(e.message)
+    image = f"data:{ls.mimetype};base64,{base64.b64encode(ls.image).decode('ascii')}"
+    return _json_ok({'id': ls.id, 'kind': ls.kind, 'image': image, 'expires_in': qq_login.QR_TIMEOUT})
+
+
+async def admin_qqlogin_status(request):
+    session = _api_admin(request)
+    ls = qq_login.get_session(request.query.get('id', ''), session['username'])
+    if not ls:
+        return _json_error('登录会话不存在或已过期', 404)
+    return _json_ok(ls.public())
+
+
+async def admin_qqlogin_cancel(request):
+    session = _api_admin(request, post=True)
+    data = await request.post()
+    qq_login.cancel_session(data.get('id', ''), session['username'])
+    return _json_ok(None)
+
+
+async def admin_qqlogin_phone_send(request):
+    session = _api_admin(request, post=True)
+    data = await request.post()
+    try:
+        result = await qq_login.phone_send(session['username'], data.get('phone', ''), data.get('country_code', '86'))
+    except qq_login.LoginError as e:
+        return _json_error(e.message)
+    if result.get('url') is not None:
+        result['url'] = _safe_security_url(result['url'])
+    return _json_ok(result)
+
+
+async def admin_qqlogin_phone_verify(request):
+    session = _api_admin(request, post=True)
+    data = await request.post()
+    try:
+        ls = await qq_login.phone_verify(
+            session['username'], data.get('phone', ''), data.get('code', ''), data.get('country_code', '86'))
+    except qq_login.LoginError as e:
+        return _json_error(e.message)
+    return _json_ok(ls.public())
+
+
+async def admin_qqlogin_apply(request):
+    session = _api_admin(request, post=True)
+    data = await request.post()
+    ls = qq_login.get_session(data.get('id', ''), session['username'])
+    if not ls:
+        return _json_error('登录会话不存在或已过期，请重新登录', 404)
+    try:
+        note = qq_login.apply_credential(ls, data.get('target', ''), data.get('enable_refresh') == '1')
+    except qq_login.LoginError as e:
+        return _json_error(e.message)
+    try:
+        # 重新加载配置并重新注册定时任务，让自动刷新登录立即生效
+        config.hot_reload_config()
+    except Exception as e:
+        note += f'；热重载配置失败({e})，请到配置管理页手动热重载'
+    return _json_ok({'note': note})
+
+
 def register_routes(app):
     app.router.add_static('/static/', './webui/static', show_index=False)
     app.router.add_get('/', home)
@@ -932,5 +1194,12 @@ def register_routes(app):
     app.router.add_get('/admin/health', admin_health_page)
     app.router.add_post('/admin/health/refresh', admin_health_refresh)
     app.router.add_get('/admin/health/refresh', redirect_to_admin)
+    app.router.add_get('/admin/qqlogin', admin_qqlogin_page)
+    app.router.add_post('/admin/qqlogin/qr/start', admin_qqlogin_qr_start)
+    app.router.add_get('/admin/qqlogin/status', admin_qqlogin_status)
+    app.router.add_post('/admin/qqlogin/cancel', admin_qqlogin_cancel)
+    app.router.add_post('/admin/qqlogin/phone/send', admin_qqlogin_phone_send)
+    app.router.add_post('/admin/qqlogin/phone/verify', admin_qqlogin_phone_verify)
+    app.router.add_post('/admin/qqlogin/apply', admin_qqlogin_apply)
     app.router.add_get('/admin/admins', admin_admins_page)
     app.router.add_post('/admin/admins/password', admin_admin_password_save)

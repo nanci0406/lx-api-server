@@ -114,7 +114,36 @@ def _build_request(user_info):
                 'param': param,
             },
         }
-    logger.error(f'{_account_label(user_info)}刷新登录失败: 未知的 qqmusic_key 格式(应以 W_X 或 Q_H_L 开头)')
+    if key and uin.isdigit():
+        # 其他类型的 key(例如手机验证码登录得到的)：使用通用的刷新接口，登录类型取自登录时保存的 login_type
+        login_type = str(user_info.get('login_type') or '0')
+        param = {
+            'openid': extra['openid'],
+            'access_token': extra['access_token'],
+            'refresh_token': extra['refresh_token'],
+            'expired_in': 0,
+            'str_musicid': uin,
+            'musicid': int(uin),
+            'musickey': key,
+            'unionid': extra['unionid'],
+            'refresh_key': extra['refresh_key'],
+            'loginMode': 2,
+        }
+        return WX_LOGIN_URL, {
+            'comm': {
+                'ct': '11',
+                'cv': '12080008',
+                'v': '12080008',
+                'tmeAppID': 'qqmusic',
+                'tmeLoginType': login_type,
+            },
+            'req1': {
+                'module': 'music.login.LoginServer',
+                'method': 'Login',
+                'param': param,
+            },
+        }
+    logger.error(f'{_account_label(user_info)}刷新登录失败: qqmusic_key 或 uin 无效')
     return None
 
 

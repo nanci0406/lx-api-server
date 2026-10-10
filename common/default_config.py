@@ -126,6 +126,7 @@ module:
       openid: ""
       access_token: ""
       unionid: ""
+      login_type: "" # 登录方式：1 微信，2 QQ，其他为手机验证码等。通过后台"QQ 登录"页登录时自动填写，手动配置时可留空
       refresh_login: # 刷新登录相关配置，enable是否启动，interval刷新间隔
         enable: false
         interval: 86000
@@ -173,6 +174,7 @@ module:
         openid: ""
         access_token: ""
         unionid: ""
+        login_type: ""
         refresh_login: # cookie池中对于此账号刷新登录的配置，账号间互不干扰
           enable: false
           interval: 86000
