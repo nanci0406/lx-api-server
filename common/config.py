@@ -262,6 +262,21 @@ def write_config(key, value):
     with open('./config/config.yml', 'w', encoding='utf-8') as f:
         y.dump(config, f)
 
+    # 同步内存中的配置，否则 read_config 读到的仍是旧值
+    # （例如刷新登录后新的 qqmusic_key 只写进了文件，下一轮刷新又拿旧 key 去刷）
+    _sync_memory_config(keys, value)
+
+
+def _sync_memory_config(keys, value):
+    current = variable.config
+    if not isinstance(current, dict):
+        return
+    for k in keys[:-1]:
+        if not isinstance(current.get(k), dict):
+            current[k] = {}
+        current = current[k]
+    current[keys[-1]] = value
+
 
 def _apply_runtime_settings():
     variable.log_length_limit = read_config('common.log_length_limit')
