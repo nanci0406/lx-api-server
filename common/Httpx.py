@@ -210,7 +210,7 @@ def checkcn():
         if (not variable.iscn):
             variable.fakeip = config.read_config('common.fakeip')
             logger.info(f"您在非中国大陆服务器({body.country})上启动了项目，已自动开启ip伪装")
-            logger.warning("此方式无法解决咪咕音乐的链接获取问题，您可以配置代理，服务器地址可在下方链接中找到\nhttps://hidemy.io/cn/proxy-list/?country=CN#list")
+            logger.warning("海外服务器可能无法获取部分平台的链接，如有需要请配置国内代理，代理地址可在下方链接中找到\nhttps://hidemy.io/cn/proxy-list/?country=CN#list")
     except Exception as e:
         logger.warning('检查服务器位置失败，已忽略')
         logger.warning(traceback.format_exc())

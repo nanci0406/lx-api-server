@@ -12,8 +12,6 @@ from common.utils import require
 from common import log
 from common import config
 # 从.引入的包并没有在代码中直接使用，但是是用require在请求时进行引入的，不要动
-from . import kw
-from . import mg
 from . import kg
 from . import tx
 from . import wy
@@ -31,20 +29,14 @@ sourceExpirationTime = {
         "expire": True,
         "time": 24 * 60 * 60,  # 24 hours
     },
-    'kw': {
-        "expire": True,
-        "time": 60 * 60  # 60 minutes
-    },
     'wy': {
         "expire": True,
         "time": 20 * 60,  # 20 minutes
     },
-    'mg': {
-        "expire": False,
-        "time": 0,
-    }
-
 }
+
+# 当前支持的音源
+SUPPORTED_SOURCES = tuple(sourceExpirationTime.keys())
 
 
 async def url(source, songId, quality, query = {}):

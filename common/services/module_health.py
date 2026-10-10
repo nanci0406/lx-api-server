@@ -8,16 +8,12 @@ MODULE_PROBES = {
     'kg': 'https://gateway.kugou.com',
     'tx': 'https://u.y.qq.com',
     'wy': 'https://interface.music.163.com',
-    'mg': 'https://m.music.migu.cn',
-    'kw': 'https://bd-api.kuwo.cn',
 }
 
 REQUIRED_FIELDS = {
     'kg': [('module.kg.user.token', 'token'), ('module.kg.user.userid', 'userid')],
     'tx': [('module.tx.user.qqmusic_key', 'qqmusic_key'), ('module.tx.user.uin', 'uin')],
     'wy': [('module.wy.user.cookie', 'cookie')],
-    'mg': [('module.mg.user.by', 'by'), ('module.mg.user.session', 'session')],
-    'kw': [('module.kw.user.uid', 'uid'), ('module.kw.user.token', 'token'), ('module.kw.user.device_id', 'device_id')],
 }
 
 # 各音源登录保活类定时任务的名称前缀，用于把任务失败反映到模块状态上
@@ -25,8 +21,9 @@ SOURCE_TASK_PREFIXES = {
     'tx': ('qqmusic_refresh_login',),
     'kg': ('kg_refresh_login', 'kgmusic_refresh_login', 'kugou_lite_sign_in'),
     'wy': ('wy_refresh_login',),
-    'mg': ('migu_refresh_login',),
 }
+
+SOURCES = list(MODULE_PROBES)
 
 AUTO_REFRESH_SECONDS = 120
 
@@ -98,7 +95,7 @@ async def _probe_source(source: str, force: bool = False):
 
 async def refresh_module_health(force: bool = False):
     results = []
-    for source in ['kg', 'tx', 'wy', 'mg', 'kw']:
+    for source in SOURCES:
         result = await _probe_source(source, force)
         results.append(result)
     conn = db.get_connection()
@@ -115,6 +112,9 @@ async def refresh_module_health(force: bool = False):
                      admin_detail = excluded.admin_detail''',
                 (item['source'], item['status'], item['detail'], now, item.get('admin_detail')),
             )
+        # 已下线的音源(如咪咕、酷我)留下的旧记录不再展示
+        placeholders = ','.join('?' * len(SOURCES))
+        conn.execute(f'DELETE FROM module_health WHERE source NOT IN ({placeholders})', SOURCES)
         conn.commit()
     finally:
         conn.close()

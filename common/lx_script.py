@@ -68,6 +68,12 @@ async def get_script():
     else:
         logger.warning('请求源脚本内容失败')
 
+def supported_quality(quality):
+    """只保留当前支持的音源：旧配置里可能还留着已下线的音源(如酷我、咪咕)，不能写进脚本让客户端以为可用"""
+    import modules
+    return {source: qualities for source, qualities in (quality or {}).items()
+            if source in modules.SUPPORTED_SOURCES}
+
 async def generate_script_response(request):
     # 从请求中获取 key
     request_key = request.query.get('key')
@@ -117,7 +123,7 @@ async def generate_script_response(request):
             new_script_lines.append(oline)
 
     r = '\n'.join(new_script_lines)
-    r = re.sub(r'const MUSIC_QUALITY = {[^}]+}', f'const MUSIC_QUALITY = JSON.parse(\'{json.dumps(config.read_config("common.download_config.quality"))}\')', r)
+    r = re.sub(r'const MUSIC_QUALITY = {[^}]+}', f'const MUSIC_QUALITY = JSON.parse(\'{json.dumps(supported_quality(config.read_config("common.download_config.quality")))}\')', r)
 
     # 用于检查更新
     if config.read_config("common.download_config.update"):

@@ -33,8 +33,6 @@ pm = {
     'qq': 'tx',
     'wyy': 'wy',
     'kugou': 'kg',
-    "kuwo": "kw",
-    "mgu": "mg"
 }
 
 internal_trans = {
@@ -65,10 +63,16 @@ async def handleGcspBody(body):
 
     data["te"] = json.loads(data["text_1"])
 
-    body = await modules.url(pm[data["te"]["platform"]], data["te"]["t1"], qm[data["te"]["t2"]])
+    source = pm.get(data["te"]["platform"])
+    quality = qm.get(data["te"]["t2"])
+    if (source is None or quality is None):
+        # 平台已下线(如酷我、咪咕)或音质未知
+        return zlib.compress(json.dumps({"code": "403", "error_msg": "暂不支持该平台或音质", "data": None}, ensure_ascii = False).encode("utf-8"))
+
+    body = await modules.url(source, data["te"]["t1"], quality)
 
     if (body["code"] == 0):
-        return zlib.compress(json.dumps({"code": "200", "error_msg": "success", "data": body["data"] if (pm[data["te"]["platform"]] != "kw") else {"bitrate": "123", "url": body["data"]}}, ensure_ascii = False).encode("utf-8"))
+        return zlib.compress(json.dumps({"code": "200", "error_msg": "success", "data": body["data"]}, ensure_ascii = False).encode("utf-8"))
     else:
         return zlib.compress(json.dumps({"code": "403", "error_msg": "内部系统错误，请稍后再试", "data": None}, ensure_ascii = False).encode("utf-8"))
 

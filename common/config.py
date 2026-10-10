@@ -346,7 +346,6 @@ def restart_scheduler_tasks():
         'modules.kg.refresh_login',
         'modules.tx.refresh_login',
         'modules.wy.refresh_login',
-        'modules.mg.refresh_login',
     ]
     for module_name in module_names:
         if module_name in sys.modules:

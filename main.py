@@ -156,6 +156,10 @@ async def handle(request):
     songId = request.match_info.get('songId')
     quality = request.match_info.get('quality')
 
+    if source not in modules.SUPPORTED_SOURCES:
+        # 先于配置读取：未知(或已下线)的音源名不应该在配置里被当作 module.<名字> 去查找
+        return handleResult({'code': 1, 'msg': '未知的源或不支持的方法', 'data': None})
+
     key_enable = config.read_config("security.key.enable")
     current_user = None
     if key_enable:
@@ -172,16 +176,16 @@ async def handle(request):
 
     try:
         query = dict(request.query)
+        # 关闭了的平台对所有方法都不再提供服务(以前 info 等不在 modules 里直接定义的方法会绕过这个开关)
+        if not config.read_config(f'module.{source}.enable'):
+            await stats_service.record_parse_async(current_user, source, method, songId, quality, False, '此平台已停止服务', request.remote_addr)
+            return handleResult({
+                'code': 4,
+                'msg': '此平台已停止服务',
+                'data': None,
+                "Your IP": request.remote_addr
+            }, 404)
         if (method in dir(modules)):
-            source_enable = config.read_config(f'module.{source}.enable')
-            if not source_enable:
-                await stats_service.record_parse_async(current_user, source, method, songId, quality, False, '此平台已停止服务', request.remote_addr)
-                return handleResult({
-                    'code': 4,
-                    'msg': '此平台已停止服务',
-                    'data': None,
-                    "Your IP": request.remote_addr
-                }, 404)
             result = await getattr(modules, method)(source, songId, quality, query)
             await stats_service.record_parse_async(current_user, source, method, songId, quality, True, None, request.remote_addr)
             return handleResult(result)

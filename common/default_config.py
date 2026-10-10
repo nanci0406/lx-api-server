@@ -44,11 +44,9 @@ common:
     # {key}为请求时携带的key
     updateMsg: "源脚本有更新啦，更新地址:\\n{updateUrl}"
     quality:
-      kw: [128k]
       kg: [128k]
       tx: [128k]
       wy: [128k]
-      mg: [128k]
   local_music: # 服务器侧本地音乐相关配置，如果需要使用此功能请确保你的带宽足够
     audio_path: ./audio
     temp_path: ./temp
@@ -144,40 +142,6 @@ module:
         enable: false
         interval: 86400
 
-  mg: # 咪咕音乐相关配置
-    enable: true # 是否开启本平台服务
-    user: # 研究不深，后两项自行抓包获取，网页端cookie
-      by: ""
-      session: ""
-      useragent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/89.0.4389.82 Safari/537.36
-      refresh_login: # cookie保活配置
-        enable: false
-        interval: 86400
-
-  kw: # 酷我音乐相关配置，proto支持值：['bd-api', 'kuwodes']
-    enable: true # 是否开启本平台服务
-    proto: bd-api
-    user:
-      uid: "0"
-      token: ""
-      device_id: "0"
-    des: # kuwodes接口（mobi, nmobi）一类的加密相关配置
-      f: kuwo
-      need_encrypt: true # 是否开启kuwodes
-      # {songId}为歌曲id
-      # {map_quality}为map后的歌曲音质（酷我规范）
-      # {raw_quality}为请求时的歌曲音质（LX规范）
-      # {ext}为歌曲文件扩展名
-      params: type=convert_url_with_sign&rid={songId}&quality={map_quality}&ext={ext}
-      host: nmobi.kuwo.cn
-      path: mobi.s
-      # 这里是reponse_type的所有支持值，当设置为json时会使用到下面的两个值来获取url/bitrate，如果为text，则为传统的逐行解析方式
-      response_type: json
-      url_json_path: data.url
-      bitrate_json_path: data.bitrate
-      headers:
-        User-Agent: okhttp/3.10.0
-
   gcsp: # 歌词适配后端配置
     # 请注意只允许私用，不要给原作者带来麻烦，谢谢
     enable: false # 是否启用歌词适配后端
@@ -218,17 +182,4 @@ module:
         refresh_login: # cookie池中对于此账号刷新登录的配置，账号间互不干扰
           enable: false
           interval: 86400
-
-    mg:
-      - by: ""
-        session: ""
-        useragent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/89.0.4389.82 Safari/537.36
-        refresh_login:
-          enable: false
-          interval: 86400
-
-    kw:
-      - uid: "0"
-        token: ""
-        device_id: "0"
 """

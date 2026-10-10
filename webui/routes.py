@@ -17,7 +17,7 @@ STATUS_LABELS = {
     'disabled': '已关闭',
 }
 
-DOWNLOAD_SOURCES = [('kg', '酷狗'), ('tx', 'QQ 音乐'), ('wy', '网易云'), ('mg', '咪咕'), ('kw', '酷我')]
+DOWNLOAD_SOURCES = [('kg', '酷狗'), ('tx', 'QQ 音乐'), ('wy', '网易云')]
 QUALITY_OPTIONS = ['128k', '320k', 'flac', 'flac24bit', 'master']
 
 CONFIG_SECTIONS = [
@@ -105,35 +105,6 @@ CONFIG_SECTIONS = [
         'fields': [
             {'key': 'module.wy.user.refresh_login.enable', 'label': '启用刷新登录', 'type': 'bool'},
             {'key': 'module.wy.user.refresh_login.interval', 'label': '刷新间隔(秒)', 'type': 'int'},
-        ],
-    },
-    {
-        'title': '咪咕模块',
-        'description': '咪咕需要 by 与 session，User-Agent 按需调整。',
-        'fields': [
-            {'key': 'module.mg.enable', 'label': '启用咪咕', 'type': 'bool'},
-            {'key': 'module.mg.user.by', 'label': 'by', 'type': 'text'},
-            {'key': 'module.mg.user.session', 'label': 'session', 'type': 'text'},
-            {'key': 'module.mg.user.useragent', 'label': 'User-Agent', 'type': 'textarea', 'rows': 3},
-        ],
-    },
-    {
-        'title': '咪咕自动登录',
-        'description': '咪咕 cookie 保活任务设置，保存后会立即按最新配置重建任务。',
-        'fields': [
-            {'key': 'module.mg.user.refresh_login.enable', 'label': '启用刷新登录', 'type': 'bool'},
-            {'key': 'module.mg.user.refresh_login.interval', 'label': '刷新间隔(秒)', 'type': 'int'},
-        ],
-    },
-    {
-        'title': '酷我模块',
-        'description': '酷我的 uid、token、device_id 缺一不可。',
-        'fields': [
-            {'key': 'module.kw.enable', 'label': '启用酷我', 'type': 'bool'},
-            {'key': 'module.kw.proto', 'label': '协议类型', 'type': 'text'},
-            {'key': 'module.kw.user.uid', 'label': 'uid', 'type': 'text'},
-            {'key': 'module.kw.user.token', 'label': 'token', 'type': 'text'},
-            {'key': 'module.kw.user.device_id', 'label': 'device_id', 'type': 'text'},
         ],
     },
 ]
