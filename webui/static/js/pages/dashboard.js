@@ -71,7 +71,7 @@ export async function dashboardPage(ctx) {
   const head = h('div', { class: 'page-head' },
     h('div', null, h('h2', null, `${greeting()}，${ctx.me.username}`), h('p', { class: 'uptime' }, '正在加载服务状态…')),
     h('div', { class: 'actions' },
-      h('a', { class: 'btn', href: '/admin/qqlogin', 'data-link': true }, icon('qr'), 'QQ 登录'),
+      h('a', { class: 'btn', href: '/admin/music-login', 'data-link': true }, icon('qr'), '登录音乐账号'),
       h('a', { class: 'btn primary', href: '/admin/users?new=1', 'data-link': true }, icon('plus'), '新建用户')));
   const body = h('div', null,
     h('div', { class: 'grid cols-4' }, Array.from({ length: 4 }, () => h('div', { class: 'skeleton block' }))),

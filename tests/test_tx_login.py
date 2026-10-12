@@ -30,6 +30,7 @@ class FakeQQServer:
         self.wx_states = []  # 依次返回的微信长轮询响应
         self.cgi_results = {}  # (module, method) -> (业务码, data)
         self.set_p_skey = True
+        self.p_skey_needs_cookie = False  # True 时 check_sig 只有带上 pt2gguin 才下发 p_skey(模拟必须按浏览器方式请求)
         self.authorize_hops = ['https://y.qq.com/portal/wx_redirect.html?login_type=1&code=AUTHCODE&state=state']
         self.runner = None
         self.base = ''
@@ -71,13 +72,25 @@ class FakeQQServer:
     async def ptqrlogin(self, request):
         self._log(request)
         text = self.qq_states.pop(0) if len(self.qq_states) > 1 else self.qq_states[0]
-        return web.Response(text=text)
+        response = web.Response(text=text)
+        if text.startswith("ptuiCB('0'"):
+            # 真实服务下发的是 Domain=qq.com；测试服务器在 127.0.0.1 上，所以用它自己的主机名
+            response.headers.add('Set-Cookie', f'pt2gguin=o0123456; Path=/; Domain={request.url.host}')
+            response.headers.add('Set-Cookie', 'superkey=SK; Path=/; Domain=ptlogin2.qq.com')
+            response.headers.add('Set-Cookie', 'ptcz=HOSTONLY; Path=/')
+        return response
 
     async def check_sig(self, request):
         self._log(request)
-        response = web.Response(status=302, headers={'Location': 'https://y.qq.com/'})
-        if self.set_p_skey:
-            response.headers.add('Set-Cookie', 'p_skey=PSKEY_VALUE; Path=/')
+        response = web.Response(status=302, headers={'Location': 'https://graph.qq.com/oauth2.0/login_jump?x=1'})
+        # 和真实接口一样：不是浏览器的 User-Agent 拿不到 p_skey；先下发一个空值清掉旧 Cookie，再下发新值
+        has_cookie = 'pt2gguin=o0123456' in request.headers.get('Cookie', '')
+        if self.set_p_skey and 'Mozilla/5.0' in request.headers.get('User-Agent', '') and \
+                (has_cookie or not self.p_skey_needs_cookie):
+            response.headers.add('Set-Cookie', 'p_skey=; Path=/; Domain=qq.com')
+            response.headers.add('Set-Cookie', 'p_skey=PSKEY_VALUE; Path=/; Domain=graph.qq.com')
+            response.headers.add('Set-Cookie', 'p_uin=o0123456; Path=/; Domain=graph.qq.com')
+            response.headers.add('Set-Cookie', 'pt4_token=T4*TOKEN; Path=/; Domain=graph.qq.com')
         return response
 
     async def authorize(self, request):
@@ -125,10 +138,14 @@ class LoginTestCase(unittest.IsolatedAsyncioTestCase):
         patchers = [
             mock.patch.dict(login.ENDPOINTS, self.fake.endpoints()),
             mock.patch.object(login, 'POLL_INTERVAL', 0.01),
+            mock.patch.object(login, 'ensure_qimei', new=self.fake_qimei),  # 不访问真实的 QIMEI 接口
         ]
         for patcher in patchers:
             patcher.start()
             self.addCleanup(patcher.stop)
+
+    async def fake_qimei(self, device):
+        return {'q16': 'Q16VALUE', 'q36': 'Q36VALUE'}
 
     async def wait_for(self, ls, states, timeout=5):
         deadline = time.time() + timeout
@@ -209,13 +226,17 @@ class QqQrTest(LoginTestCase):
         self.assertEqual(poll['query']['ptqrtoken'], str(login.hash33(QRSIG)))
         check_sig = by_path['/check_sig']
         self.assertEqual((check_sig['query']['uin'], check_sig['query']['ptsigx']), ('123456', 'SIGX_VALUE'))
+        for request in (poll, check_sig):
+            self.assertEqual(request['headers']['User-Agent'], login.BROWSER_UA)
         authorize = by_path['/authorize']
-        self.assertEqual(authorize['headers']['Cookie'], 'uin=123456; p_skey=PSKEY_VALUE')
+        # check_sig 下发的 Cookie 原样带给 authorize(空值不覆盖，特殊字符不加引号)
+        self.assertEqual(authorize['headers']['Cookie'], 'p_skey=PSKEY_VALUE; p_uin=o0123456; pt4_token=T4*TOKEN')
         self.assertEqual(authorize['form']['g_tk'], str(login.hash33('PSKEY_VALUE', 5381)))
         self.assertEqual(authorize['form']['client_id'], login.QQ_CLIENT_ID)
         exchange = self.cgi_requests()[0]['body']
         self.assertEqual(exchange['req_0']['param'], {'code': 'AUTHCODE'})
-        self.assertEqual(exchange['comm']['tmeLoginType'], 2)
+        self.assertEqual((exchange['comm']['tmeLoginType'], exchange['comm']['ct']), (2, 11))
+        self.assertEqual(self.cgi_requests()[0]['headers']['User-Agent'], 'QQMusic 14090008(android 10)')
         self.assertNotIn('cookie', {k.lower() for k in self.cgi_requests()[0]['headers']})
 
     async def test_terminal_states(self):
@@ -231,6 +252,51 @@ class QqQrTest(LoginTestCase):
         ls = await login.start_qr('qq', 'admin')
         await self.wait_for(ls, ('error',))
         self.assertIn('p_skey', ls.message)
+        self.assertIn('HTTP 302，跳转到 graph.qq.com/oauth2.0/login_jump', ls.message)  # 不带参数
+        self.assertNotIn('x=1', ls.message)
+
+    async def test_uin_is_read_from_the_exact_parameter(self):
+        self.fake.qq_states = [ptui(0, 'https://x/check_sig?pt_uin=999&uin=42&service=ptqrlogin&ptsigx=S&s_url=u')]
+        async with login.new_http_session() as http:
+            event, info = await login.qq_qr_check(http, QRSIG)
+        self.assertEqual((event, info['uin'], info['sigx']), ('done', '42', 'S'))
+        self.assertTrue(info['url'].endswith('ptsigx=S&s_url=u'))
+        self.assertTrue(any(c.startswith('pt2gguin=o0123456;') for c in info['set_cookies']))
+
+    async def test_browser_style_retry_when_the_first_check_sig_gives_no_p_skey(self):
+        self.fake.p_skey_needs_cookie = True
+        check_url = f'{self.fake.base}/check_sig?pttype=1&uin=123456&service=ptqrlogin&ptsigx=SIGX2&s_url=u&daid=383'
+        self.fake.qq_states = [ptui(0, check_url, '登录成功')]
+        self.fake.cgi_results[('QQConnectLogin.LoginServer', 'QQLogin')] = (0, LOGIN_DATA)
+        ls = await login.start_qr('qq', 'admin')
+        await self.wait_for(ls, ('done',))
+        first, second = [r for r in self.fake.requests if r['path'] == '/check_sig']
+        self.assertNotIn('Cookie', first['headers'])  # 第一次按参考实现：不带 Cookie
+        self.assertEqual(second['query'], {'pttype': '1', 'uin': '123456', 'service': 'ptqrlogin', 'ptsigx': 'SIGX2',
+                                           's_url': 'u', 'daid': '383'})  # 第二次原样打开 ptlogin 给出的地址
+        # 只带浏览器会带给 check_sig 主机的 Cookie：Domain=qq.com 的带，ptlogin2.qq.com 的和没有 Domain 的不带
+        self.assertEqual(second['headers']['Cookie'], 'pt2gguin=o0123456')
+        self.assertEqual(ls.credential['qqmusic_key'], 'Q_H_L_NEWKEY')
+
+    async def test_both_check_sig_attempts_are_reported(self):
+        self.fake.set_p_skey = False
+        check_url = f'{self.fake.base}/check_sig?uin=1&service=ptqrlogin&ptsigx=S&s_url=u'
+        self.fake.qq_states = [ptui(0, check_url)]
+        ls = await login.start_qr('qq', 'admin')
+        await self.wait_for(ls, ('error',))
+        self.assertEqual(ls.message, '获取登录凭据失败: 没有拿到 p_skey(HTTP 302，跳转到 graph.qq.com/oauth2.0/login_jump；'
+                                     '重试：HTTP 302，跳转到 graph.qq.com/oauth2.0/login_jump)')
+
+    def test_check_sig_url_and_cookie_filters(self):
+        self.assertTrue(login._check_sig_url_allowed('https://ssl.ptlogin2.graph.qq.com/check_sig?x=1'))
+        self.assertFalse(login._check_sig_url_allowed('https://ssl.ptlogin2.graph.qq.com/other'))
+        self.assertFalse(login._check_sig_url_allowed('https://evil.example/check_sig'))
+        self.assertFalse(login._check_sig_url_allowed(''))
+        cookies = login._cookies_for_host([
+            'a=1; Domain=.qq.com; Path=/', 'b=2; domain=graph.qq.com', 'c=3; Domain=ptlogin2.qq.com', 'd=4; Path=/',
+            'e=; Domain=qq.com', 'a=5; Domain=qq.com',
+        ], 'ssl.ptlogin2.graph.qq.com')
+        self.assertEqual(cookies, {'a': '5', 'b': '2'})
 
     async def test_unparseable_poll_response_is_an_error(self):
         self.fake.qq_states = ['<html>not ptuiCB</html>']
@@ -238,11 +304,19 @@ class QqQrTest(LoginTestCase):
         await self.wait_for(ls, ('error',))
 
     async def test_authorize_follows_allowed_redirects_until_a_code_appears(self):
-        self.fake.authorize_hops = ['https://graph.qq.com/hop', 'https://y.qq.com/done?code=SECONDCODE']
+        # 把本地测试服务器加进白名单，验证会跟随白名单内的跳转，并在出现 code 时停下(不去请求最终页面)
+        self.fake.authorize_hops = [f'{self.fake.base}/hop', 'https://y.qq.com/done?code=SECONDCODE']
+        with mock.patch.object(login, 'ALLOWED_REDIRECT_SUFFIXES', login.ALLOWED_REDIRECT_SUFFIXES + ('127.0.0.1',)):
+            async with login.new_http_session() as http:
+                self.assertEqual(await login.qq_authorize_code(http, '1', 'S'), 'SECONDCODE')
+        self.assertEqual([r['path'] for r in self.fake.requests], ['/check_sig', '/authorize', '/hop'])
+
+    async def test_authorize_refuses_unknown_redirects(self):
+        self.fake.authorize_hops = ['https://evil.example/next']
         async with login.new_http_session() as http:
-            # 第一跳指向 graph.qq.com，测试服务器不在白名单里，所以只验证"白名单外的第一跳会被拒绝"
-            with self.assertRaises(login.LoginError):
+            with self.assertRaises(login.LoginError) as ctx:
                 await login.qq_authorize_code(http, '1', 'S')
+        self.assertIn('未知的地址', ctx.exception.message)
 
     async def test_authorize_without_any_redirect_fails(self):
         self.fake.authorize_hops = ['']
@@ -333,15 +407,6 @@ class SessionManagerTest(LoginTestCase):
 
 
 class PhoneLoginTest(LoginTestCase):
-    async def asyncSetUp(self):
-        await super().asyncSetUp()
-        patcher = mock.patch.object(login, 'ensure_qimei', new=self.fake_qimei)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
-    async def fake_qimei(self, device):
-        return {'q16': 'Q16VALUE', 'q36': 'Q36VALUE'}
-
     async def test_send_states(self):
         send = ('music.login.LoginServer', 'SendPhoneAuthCode')
         for result, expected in (((0, {}), {'state': 'sent'}),

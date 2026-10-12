@@ -18,7 +18,13 @@ function dayLabel(day) {
 
 // 页面上同一时间只有一个提示框；图表被替换(定时刷新、切换页面)或页面滚动时收起
 let tip = null;
-const hideTip = () => { if (tip) { tip.remove(); tip = null; } };
+const hideTip = () => {
+  if (tip) { tip.remove(); tip = null; }
+  document.querySelectorAll('.chart.focus').forEach((chart) => {
+    chart.classList.remove('focus');
+    chart.querySelectorAll('.bar-group.on').forEach((el) => el.classList.remove('on'));
+  });
+};
 document.addEventListener('touchstart', (event) => { if (!event.target.closest('.chart-wrap')) hideTip(); }, { passive: true });
 window.addEventListener('scroll', hideTip, { passive: true });
 
@@ -26,14 +32,22 @@ function showTip(target, row) {
   hideTip();
   const failure = row.total - row.success;
   tip = h('div', { class: 'chart-tip' },
-    h('div', null, h('b', null, row.day)),
-    h('div', null, `解析 ${row.total} 次`),
-    h('div', null, `成功 ${row.success}　失败 ${failure}`));
+    h('div', null, h('b', null, row.day), `　共 ${row.total} 次`),
+    h('div', null, h('span', { class: 'key ok' }), `成功 ${row.success}`),
+    h('div', null, h('span', { class: 'key bad' }), `失败 ${failure}`));
   document.body.appendChild(tip);
   const rect = target.getBoundingClientRect();
   tip.style.left = `${rect.left + rect.width / 2}px`;
   tip.style.top = `${rect.top}px`;
 }
+
+/** 顶端圆角、底端方角的柱子(数据端圆角，基线保持平直) */
+function columnPath(x, y, w, height, radius) {
+  const r = Math.max(0, Math.min(radius, w / 2, height));
+  return `M${x},${y + height}V${y + r}Q${x},${y} ${x + r},${y}H${x + w - r}Q${x + w},${y} ${x + w},${y + r}V${y + height}Z`;
+}
+
+const GAP = 2; // 同一根柱子里两段之间留出的空隙
 
 /** data: [{day: 'YYYY-MM-DD', total, success}] */
 export function barChart(data, { height = 220 } = {}) {
@@ -51,7 +65,7 @@ export function barChart(data, { height = 220 } = {}) {
     const max = niceMax(Math.max(0, ...data.map((row) => row.total)));
     const n = Math.max(1, data.length);
     const slot = plotW / n;
-    const barW = Math.max(6, Math.min(34, slot * 0.58));
+    const barW = Math.max(4, Math.min(24, slot * 0.56));
     const labelEvery = Math.max(1, Math.ceil(n / Math.max(4, Math.floor(plotW / 56))));
 
     const root = svg('svg', { class: 'chart', viewBox: `0 0 ${width} ${height}`, width, height, role: 'img',
@@ -66,17 +80,28 @@ export function barChart(data, { height = 220 } = {}) {
       const x = pad.left + slot * index + (slot - barW) / 2;
       const failure = Math.max(0, row.total - row.success);
       const okH = (row.success / max) * plotH;
-      const badH = (failure / max) * plotH;
+      const totalH = (row.total / max) * plotH;
       const base = pad.top + plotH;
       const group = svg('g', { class: 'bar-group' });
       group.style.setProperty('--i', String(index)); // 不能写 style 属性：CSP 禁止内联样式，CSSOM 不受限制
-      if (okH > 0) group.append(svg('rect', { class: 'bar-ok', x, y: base - okH, width: barW, height: okH, rx: Math.min(4, barW / 3) }));
-      if (badH > 0) group.append(svg('rect', { class: 'bar-bad', x, y: base - okH - badH, width: barW, height: badH, rx: Math.min(4, barW / 3) }));
+      // 成功在下、失败在上；只有最上面一段有圆角，两段之间留 2px 空隙(从上面一段里扣除，总高度不变)
+      if (failure > 0 && okH > 0) {
+        group.append(svg('rect', { class: 'bar-ok', x, y: base - okH, width: barW, height: okH }));
+        const badH = Math.max(1, totalH - okH - GAP);
+        group.append(svg('path', { class: 'bar-bad', d: columnPath(x, base - totalH, barW, badH, 4) }));
+      } else if (totalH > 0) {
+        group.append(svg('path', { class: failure > 0 ? 'bar-bad' : 'bar-ok', d: columnPath(x, base - totalH, barW, totalH, 4) }));
+      }
       root.append(group);
       const hit = svg('rect', { class: 'hit', x: pad.left + slot * index, y: pad.top, width: slot, height: plotH });
-      hit.addEventListener('mouseenter', () => showTip(group.firstChild || hit, row));
+      const show = () => {
+        showTip(group.lastChild || hit, row); // 会先收起之前的提示和高亮
+        group.classList.add('on');
+        root.classList.add('focus');
+      };
+      hit.addEventListener('mouseenter', show);
       hit.addEventListener('mouseleave', hideTip);
-      hit.addEventListener('touchstart', () => showTip(group.firstChild || hit, row), { passive: true });
+      hit.addEventListener('touchstart', show, { passive: true });
       root.append(hit);
       if (index % labelEvery === 0 || index === n - 1) {
         root.append(svg('text', { class: 'axis-label', x: pad.left + slot * index + slot / 2, y: height - 8,

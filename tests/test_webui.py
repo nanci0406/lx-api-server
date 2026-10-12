@@ -14,6 +14,7 @@ import modules
 from common import config, db, scheduler, variable
 from common.services import admin_auth, module_health, stats_service, users_service
 from modules.tx import login as qq_login
+from modules.wy import login as wy_login
 from webui import api_admin, config_schema, routes
 
 PASSWORD = _env.ADMIN_PASSWORD
@@ -143,10 +144,10 @@ class AuthApiTest(WebUiCase):
             ('DELETE', '/api/admin/users/1'), ('POST', '/api/admin/users/1/reset-key'), ('GET', '/api/admin/stats'),
             ('GET', '/api/admin/stats/logs'), ('GET', '/api/admin/health'), ('POST', '/api/admin/health/refresh'),
             ('POST', '/api/admin/tasks/x/run'), ('POST', '/api/admin/account/password'),
-            ('POST', '/api/admin/account/logout-others'), ('POST', '/api/admin/qqlogin/qr'),
-            ('POST', '/api/admin/qqlogin/phone/send'), ('POST', '/api/admin/qqlogin/phone/verify'),
-            ('GET', '/api/admin/qqlogin/x'), ('POST', '/api/admin/qqlogin/x/cancel'),
-            ('POST', '/api/admin/qqlogin/x/apply'),
+            ('POST', '/api/admin/account/logout-others'), ('POST', '/api/admin/music-login/qr'),
+            ('POST', '/api/admin/music-login/phone/send'), ('POST', '/api/admin/music-login/phone/verify'),
+            ('GET', '/api/admin/music-login/x'), ('POST', '/api/admin/music-login/x/cancel'),
+            ('POST', '/api/admin/music-login/x/apply'),
         ]
         for method, path in endpoints:
             status, body = await self.call(method, path, {}, cookies=None)
@@ -614,7 +615,7 @@ class AccountApiTest(WebUiCase):
 # QQ 音乐登录
 # ---------------------------------------------------------------------------
 
-class QqLoginApiTest(WebUiCase):
+class MusicLoginApiTest(WebUiCase):
     async def asyncSetUp(self):
         await super().asyncSetUp()
         qq_login._sessions.clear()
@@ -633,7 +634,7 @@ class QqLoginApiTest(WebUiCase):
         return ls
 
     async def test_post_endpoints_check_the_origin(self):
-        status, _ = await self.call('POST', '/api/admin/qqlogin/qr', {'kind': 'qq'},
+        status, _ = await self.call('POST', '/api/admin/music-login/qr', {'kind': 'qq'},
                                     headers={'Origin': 'http://evil.example'})
         self.assertEqual(status, 403)
 
@@ -644,29 +645,29 @@ class QqLoginApiTest(WebUiCase):
             qq_login._sessions[ls.id] = ls
             return ls
         self.patch('start_qr', new=fake_start)
-        status, body = await self.call('POST', '/api/admin/qqlogin/qr', {'kind': 'qq'})
+        status, body = await self.call('POST', '/api/admin/music-login/qr', {'kind': 'qq'})
         data = body['data']
         self.assertEqual(status, 200)
         self.assertTrue(data['image'].startswith('data:image/png;base64,'))
         self.assertEqual(base64.b64decode(data['image'].split(',', 1)[1]), b'\x89PNG-bytes')
         self.assertEqual(data['expires_in'], qq_login.QR_TIMEOUT)
 
-        _, status_body = await self.call('GET', f"/api/admin/qqlogin/{data['id']}")
+        _, status_body = await self.call('GET', f"/api/admin/music-login/{data['id']}")
         self.assertEqual(status_body['data']['state'], 'scan')
         qq_login._sessions[data['id']].owner = 'someone-else'
-        status, _ = await self.call('GET', f"/api/admin/qqlogin/{data['id']}")
+        status, _ = await self.call('GET', f"/api/admin/music-login/{data['id']}")
         self.assertEqual(status, 404)
 
     async def test_qr_start_errors_are_reported_as_json(self):
         async def failing(kind, owner):
             raise qq_login.LoginError('同时进行的扫码登录太多，请稍后再试')
         self.patch('start_qr', new=failing)
-        status, body = await self.call('POST', '/api/admin/qqlogin/qr', {'kind': 'qq'})
+        status, body = await self.call('POST', '/api/admin/music-login/qr', {'kind': 'qq'})
         self.assertEqual((status, body['msg']), (400, '同时进行的扫码登录太多，请稍后再试'))
 
     async def test_status_never_contains_the_credential(self):
         ls = self.done_session()
-        text = await (await self.client.get(f'/api/admin/qqlogin/{ls.id}', cookies=self.cookies)).text()
+        text = await (await self.client.get(f'/api/admin/music-login/{ls.id}', cookies=self.cookies)).text()
         self.assertIn('4242', text)
         self.assertNotIn('Q_H_L_ROUTE', text)
         self.assertNotIn('"RK"', text)
@@ -684,10 +685,10 @@ class QqLoginApiTest(WebUiCase):
         self.patch('phone_send', new=fake_send)
         urls = []
         for _ in range(3):
-            _, body = await self.call('POST', '/api/admin/qqlogin/phone/send', {'phone': '13800138000'})
+            _, body = await self.call('POST', '/api/admin/music-login/phone/send', {'phone': '13800138000'})
             urls.append(body['data']['url'])
         self.assertEqual(urls, ['https://captcha.qq.com/x', '', ''])
-        _, body = await self.call('POST', '/api/admin/qqlogin/phone/send', {'phone': '13800138000'})
+        _, body = await self.call('POST', '/api/admin/music-login/phone/send', {'phone': '13800138000'})
         self.assertEqual(body['data'], {'state': 'sent', 'cooldown': qq_login.SMS_COOLDOWN})
 
     async def test_phone_verify_creates_a_result_session(self):
@@ -695,7 +696,7 @@ class QqLoginApiTest(WebUiCase):
             self.assertEqual((owner, phone, code, country_code), (USERNAME, '13800138000', '123456', '86'))
             return self.done_session(owner)
         self.patch('phone_verify', new=fake_verify)
-        _, body = await self.call('POST', '/api/admin/qqlogin/phone/verify', {
+        _, body = await self.call('POST', '/api/admin/music-login/phone/verify', {
             'phone': '13800138000', 'code': '123456', 'country_code': '86'})
         self.assertEqual((body['data']['state'], body['data']['account']['uin']), ('done', '4242'))
 
@@ -706,7 +707,7 @@ class QqLoginApiTest(WebUiCase):
         ls = self.done_session()
         reloads = []
         with mock.patch.object(config, 'hot_reload_config', side_effect=lambda: reloads.append(1)):
-            status, body = await self.call('POST', f'/api/admin/qqlogin/{ls.id}/apply',
+            status, body = await self.call('POST', f'/api/admin/music-login/{ls.id}/apply',
                                            {'target': 'main', 'enable_refresh': True})
         self.assertEqual(status, 200)
         self.assertIn('主账号', body['data']['note'])
@@ -715,23 +716,51 @@ class QqLoginApiTest(WebUiCase):
         self.assertTrue(config.read_config('module.tx.user.refresh_login.enable'))
         self.assertEqual(reloads, [1])
         # 凭证已写入配置，会话里不再保留，也不能重复保存
-        status, _ = await self.call('POST', f'/api/admin/qqlogin/{ls.id}/apply', {'target': 'main'})
+        status, _ = await self.call('POST', f'/api/admin/music-login/{ls.id}/apply', {'target': 'main'})
         self.assertEqual(status, 400)
 
     async def test_apply_validates_session_owner_and_target(self):
         ls = self.done_session()
-        status, _ = await self.call('POST', f'/api/admin/qqlogin/{ls.id}/apply', {'target': 'nowhere'})
+        status, _ = await self.call('POST', f'/api/admin/music-login/{ls.id}/apply', {'target': 'nowhere'})
         self.assertEqual(status, 400)
         ls.owner = 'someone-else'
-        status, _ = await self.call('POST', f'/api/admin/qqlogin/{ls.id}/apply', {'target': 'main'})
+        status, _ = await self.call('POST', f'/api/admin/music-login/{ls.id}/apply', {'target': 'main'})
         self.assertEqual(status, 404)
-        status, _ = await self.call('POST', '/api/admin/qqlogin/nope/apply', {'target': 'main'})
+        status, _ = await self.call('POST', '/api/admin/music-login/nope/apply', {'target': 'main'})
         self.assertEqual(status, 404)
+
+    async def test_netease_qr_login_and_save(self):
+        async def fake_start(owner):
+            ls = wy_login.LoginSession('wy', owner)
+            ls.image, ls.mimetype = b'<svg/>', 'image/svg+xml'
+            qq_login._sessions[ls.id] = ls
+            return ls
+        with mock.patch.object(wy_login, 'start_qr', new=fake_start):
+            status, body = await self.call('POST', '/api/admin/music-login/qr', {'kind': 'wy'})
+        data = body['data']
+        self.assertEqual((status, data['platform'], data['kind']), (200, 'wy', 'wy'))
+        self.assertEqual(data['image'], 'data:image/svg+xml;base64,' + base64.b64encode(b'<svg/>').decode())
+
+        for key in ('module.wy.user.cookie', 'module.wy.user.refresh_login.enable'):
+            self.set_config(key, config.read_config(key))
+        ls = qq_login._sessions[data['id']]
+        ls.credential = {'cookie': 'MUSIC_U=WEB_ROUTE; os=pc', 'uin': '42', 'nick': 'Neo', 'has_refresh': True}
+        ls.finish('done', '登录成功')
+        text = await (await self.client.get(f"/api/admin/music-login/{ls.id}", cookies=self.cookies)).text()
+        self.assertIn('Neo', text)
+        self.assertNotIn('WEB_ROUTE', text)
+        with mock.patch.object(config, 'hot_reload_config'):
+            status, body = await self.call('POST', f'/api/admin/music-login/{ls.id}/apply',
+                                           {'target': 'main', 'enable_refresh': True})
+        self.assertEqual(status, 200)
+        self.assertIn('module.wy.user', body['data']['note'])
+        self.assertEqual(config.read_config('module.wy.user.cookie'), 'MUSIC_U=WEB_ROUTE; os=pc')
+        self.assertTrue(config.read_config('module.wy.user.refresh_login.enable'))
 
     async def test_cancel(self):
         ls = qq_login.LoginSession('qq', USERNAME)
         qq_login._sessions[ls.id] = ls
-        status, body = await self.call('POST', f'/api/admin/qqlogin/{ls.id}/cancel', {})
+        status, body = await self.call('POST', f'/api/admin/music-login/{ls.id}/cancel', {})
         self.assertEqual((status, body['code']), (200, 0))
         self.assertEqual(ls.state, 'cancelled')
 

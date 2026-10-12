@@ -1,13 +1,22 @@
-// QQ 音乐登录：QQ 扫码、微信扫码、手机验证码
+// 音乐账号登录：QQ 音乐(QQ 扫码、微信扫码、手机验证码)和网易云音乐(App 扫码)
 
 import { h, icon, svg, api, setChildren, toast, segmented, switchControl, field, withLoading } from '../core.js';
+import { moduleLogo } from './dashboard.js';
 
-const METHODS = [['qq', 'QQ 扫码', 'qr'], ['wx', '微信扫码', 'chat'], ['phone', '手机验证码', 'phone']];
+const API = '/api/admin/music-login';
+const PLATFORMS = {
+  tx: { name: 'QQ 音乐', desc: 'QQ / 微信扫码，或手机验证码', main: 'module.tx.user', pool: 'module.cookiepool.tx' },
+  wy: { name: '网易云音乐', desc: '用网易云音乐 App 扫码', main: 'module.wy.user', pool: 'module.cookiepool.wy' },
+};
+const QQ_METHODS = [['qq', 'QQ 扫码', 'qr'], ['wx', '微信扫码', 'chat'], ['phone', '手机验证码', 'phone']];
+const SCAN_HINT = { qq: '请用手机 QQ 扫描二维码', wx: '请用微信扫描二维码', wy: '请用网易云音乐 App 扫描二维码' };
+const QR_ALT = { qq: 'QQ 登录二维码', wx: '微信登录二维码', wy: '网易云音乐登录二维码' };
 const RING_R = 16;
 const RING_C = 2 * Math.PI * RING_R;
 
-export async function qqLoginPage(ctx) {
-  let method = 'qq';
+export async function musicLoginPage(ctx) {
+  let platform = ctx.query.get('platform') === 'wy' ? 'wy' : 'tx';
+  let method = platform === 'wy' ? 'wy' : 'qq';
   let session = null;
   let pollTimer = null;
   let countdownTimer = null;
@@ -15,13 +24,28 @@ export async function qqLoginPage(ctx) {
 
   const stage = h('div', { class: 'qr-stage-wrap' });
   const side = h('div');
-  const tabs = segmented(METHODS, method, (value) => { method = value; start(); }, { block: true });
+  const tabs = segmented(QQ_METHODS, 'qq', (value) => { method = value; start(); }, { block: true });
+  const picker = h('div', { class: 'platform-picker', role: 'radiogroup', 'aria-label': '选择平台' });
+  const renderPicker = () => picker.replaceChildren(...Object.entries(PLATFORMS).map(([id, info]) =>
+    h('button', { type: 'button', class: ['platform-option', platform === id && 'on'], role: 'radio',
+      'aria-checked': platform === id ? 'true' : 'false', onclick: () => switchPlatform(id) },
+    moduleLogo(id), h('div', { class: 'grow' }, h('div', { class: 'name' }, info.name), h('div', { class: 'desc' }, info.desc)))));
   setChildren(ctx.container,
-    h('div', { class: 'page-head' }, h('div', null, h('h2', null, 'QQ 音乐登录'),
-      h('p', null, '扫码或用手机验证码登录 QQ 音乐，自动获取完整的登录凭证(含刷新所需的 refresh_key)，不需要再手动抓包'))),
+    h('div', { class: 'page-head' }, h('div', null, h('h2', null, '音乐账号'),
+      h('p', null, '扫码登录 QQ 音乐或网易云音乐，自动拿到完整的登录凭证并保存到配置，不需要再手动抓包'))),
+    picker,
     h('div', { class: 'grid cols-2 login-grid' },
       h('section', { class: 'card' }, h('div', { class: 'card-body stack' }, tabs, stage)),
       side));
+
+  function switchPlatform(id) {
+    if (id === platform) return;
+    platform = id;
+    method = id === 'wy' ? 'wy' : 'qq';
+    tabs.setValue('qq');
+    history.replaceState(null, '', id === 'wy' ? `${location.pathname}?platform=wy` : location.pathname);
+    start();
+  }
 
   // ---------- 通用 ----------
 
@@ -34,25 +58,35 @@ export async function qqLoginPage(ctx) {
   function cancelCurrent() {
     stopTimers();
     if (session && !session.finished) {
-      api('POST', `/api/admin/qqlogin/${encodeURIComponent(session.id)}/cancel`, {}).catch(() => {});
+      api('POST', `${API}/${encodeURIComponent(session.id)}/cancel`, {}).catch(() => {});
     }
     session = null;
   }
   ctx.onCleanup(() => { cancelCurrent(); clearInterval(cooldownTimer); });
 
   function renderHelp() {
+    const items = platform === 'wy' ? [
+      '打开网易云音乐 App，点左上角菜单里的「扫一扫」，扫描左边的二维码并确认登录。',
+      '登录后拿到的是 MUSIC_U 等 Cookie，会原样保存到配置里，解析和刷新登录都用它。',
+      '可以保存为主账号，也可以加入账号池(cookie 池)；同一个网易云账号再次加入会覆盖旧的 Cookie。',
+      '勾选「自动刷新登录」后，服务会定时续期；如果刷新提示登录已失效(301)，回到这里重新扫码即可。',
+      '凭证只在服务器内存里保留 10 分钟，点击「保存到配置」后才会写入配置文件。',
+    ] : [
+      '凭证只在服务器内存里保留 10 分钟，点击「保存到配置」后才会写入配置文件。',
+      '可以保存为主账号，也可以加入账号池(cookie 池)；同一个 QQ 号再次加入会覆盖旧凭证。',
+      '勾选「自动刷新登录」后，服务会定时续期，不需要再定期手动更新 key。',
+      '手机验证码登录可能需要先完成一次人机验证，页面会给出验证链接。',
+      '暂不支持「手机 QQ 音乐客户端扫码」的登录方式。',
+    ];
     setChildren(side, h('section', { class: 'card' },
       h('div', { class: 'card-header' }, h('div', { class: 'card-icon' }, icon('info')), h('h3', { class: 'card-title' }, '说明')),
-      h('div', { class: 'card-body' }, h('ul', { class: 'help-list' },
-        h('li', null, '登录得到的凭证只在服务器内存里保留 10 分钟，点击「保存到配置」后才会写入配置文件。'),
-        h('li', null, '可以保存为主账号，也可以加入账号池(cookie 池)；同一个 QQ 号再次加入会覆盖旧凭证。'),
-        h('li', null, '勾选「自动刷新登录」后，服务会定时续期，不需要再定期手动更新 key。'),
-        h('li', null, '手机验证码登录可能需要先完成一次人机验证，页面会给出验证链接。'),
-        h('li', null, '暂不支持「手机 QQ 音乐客户端扫码」的登录方式。')))));
+      h('div', { class: 'card-body' }, h('ul', { class: 'help-list' }, items.map((text) => h('li', null, text))))));
   }
 
   function start() {
     cancelCurrent();
+    renderPicker();
+    tabs.classList.toggle('hidden', platform === 'wy');
     renderHelp();
     if (method === 'phone') renderPhone();
     else startQr(method);
@@ -78,24 +112,24 @@ export async function qqLoginPage(ctx) {
       h('p', { class: 'muted' }, '正在获取二维码…')));
     let data;
     try {
-      data = await api('POST', '/api/admin/qqlogin/qr', { kind });
+      data = await api('POST', `${API}/qr`, { kind });
     } catch (e) {
       if (!ctx.alive() || method !== kind) return;
       setChildren(stage, qrError(e.message, kind));
       return;
     }
     if (!ctx.alive() || method !== kind) {
-      api('POST', `/api/admin/qqlogin/${encodeURIComponent(data.id)}/cancel`, {}).catch(() => {});
+      api('POST', `${API}/${encodeURIComponent(data.id)}/cancel`, {}).catch(() => {});
       return;
     }
     session = { id: data.id, kind, finished: false };
     const thisSession = session;
-    const img = h('img', { src: data.image, alt: kind === 'qq' ? 'QQ 登录二维码' : '微信登录二维码' });
+    const img = h('img', { src: data.image, alt: QR_ALT[kind] });
     const fg = svg('circle', { class: 'fg', cx: 20, cy: 20, r: RING_R, 'stroke-dasharray': RING_C, 'stroke-dashoffset': 0 });
     const ringText = svg('text', { x: 20, y: 20 }, String(data.expires_in));
     const ring = svg('svg', { class: 'qr-ring', viewBox: '0 0 40 40' }, svg('circle', { class: 'bg', cx: 20, cy: 20, r: RING_R }), fg, ringText);
     const frame = h('div', { class: ['qr-frame', kind] }, img, ring);
-    const statusText = h('p', { class: 'qr-status' }, kind === 'qq' ? '请用手机 QQ 扫描二维码' : '请用微信扫描二维码');
+    const statusText = h('p', { class: 'qr-status' }, SCAN_HINT[kind]);
     const stepsHolder = h('div', { class: 'steps-holder' }, steps('scan'));
     setChildren(stage, h('div', { class: 'qr-stage' }, frame, stepsHolder, statusText));
 
@@ -122,7 +156,7 @@ export async function qqLoginPage(ctx) {
       polling = true;
       let info;
       try {
-        info = await api('GET', `/api/admin/qqlogin/${encodeURIComponent(thisSession.id)}`);
+        info = await api('GET', `${API}/${encodeURIComponent(thisSession.id)}`);
       } catch (e) {
         if (session !== thisSession || thisSession.finished) return;
         failures += 1;
@@ -138,7 +172,11 @@ export async function qqLoginPage(ctx) {
       failures = 0;
       if (info.state === 'scan' || info.state === 'conf') {
         setChildren(stepsHolder, steps(info.state));
-        statusText.textContent = info.state === 'conf' ? '已扫码，请在手机上确认登录' : (kind === 'qq' ? '请用手机 QQ 扫描二维码' : '请用微信扫描二维码');
+        if (info.state === 'conf') {
+          statusText.textContent = info.message && kind === 'wy' ? `「${info.message}」已扫码，请在手机上确认登录` : '已扫码，请在手机上确认登录';
+        } else {
+          statusText.textContent = SCAN_HINT[kind];
+        }
         return;
       }
       stopTimers();
@@ -201,7 +239,7 @@ export async function qqLoginPage(ctx) {
       sendButton.disabled = true;
       sendButton.textContent = '发送中…';
       try {
-        const data = await api('POST', '/api/admin/qqlogin/phone/send', { phone: phone.value.trim(), country_code: country.value.trim() });
+        const data = await api('POST', `${API}/phone/send`, { phone: phone.value.trim(), country_code: country.value.trim() });
         if (data.state === 'sent') {
           toast('验证码已发送', 'success');
           cooldown(data.cooldown || 60);
@@ -237,7 +275,7 @@ export async function qqLoginPage(ctx) {
       if (!/^\d{4,8}$/.test(code.value.trim())) { setChildren(hint, h('div', { class: 'field-error' }, '请输入短信里的验证码')); code.focus(); return; }
       await withLoading(loginButton, async () => {
         try {
-          const info = await api('POST', '/api/admin/qqlogin/phone/verify',
+          const info = await api('POST', `${API}/phone/verify`,
             { phone: phone.value.trim(), code: code.value.trim(), country_code: country.value.trim() });
           session = { id: info.id, kind: 'phone', finished: true };
           setChildren(hint, h('div', { class: 'notice ok' }, icon('checkCircle'), h('div', null, '登录成功，请选择保存位置')));
@@ -255,12 +293,14 @@ export async function qqLoginPage(ctx) {
 
   function showResult(info) {
     const account = info.account || {};
+    const isWy = info.platform === 'wy';
+    const targetInfo = PLATFORMS[isWy ? 'wy' : 'tx'];
     let target = ctx.me.cookiepool ? 'pool' : 'main';
     let enableRefresh = true;
     const choices = h('div', { class: 'choice-cards' });
     const renderChoices = () => choices.replaceChildren(...[
-      ['main', '主账号', '写入 module.tx.user，替换当前的主账号'],
-      ['pool', '加入账号池', '加入 module.cookiepool.tx，同一个 QQ 号会被更新'],
+      ['main', '主账号', `写入 ${targetInfo.main}，替换当前的主账号`],
+      ['pool', '加入账号池', `加入 ${targetInfo.pool}，同一个账号会被更新`],
     ].map(([value, title, desc]) => h('label', { class: ['choice', target === value && 'on'] },
       h('input', { type: 'radio', name: 'target', value, checked: target === value, onchange: () => { target = value; renderChoices(); } }),
       h('span', { class: 'title' }, title), h('span', { class: 'desc' }, desc))));
@@ -270,8 +310,9 @@ export async function qqLoginPage(ctx) {
       h('div', { class: 'success-burst' }, icon('check')),
       h('h3', { class: 'center-title' }, '登录成功'),
       h('div', { class: 'row account-row' }, h('div', { class: 'avatar lg' }, (account.nick || account.uin || '?').slice(0, 1)),
-        h('div', { class: 'grow' }, h('div', { class: 'list-title' }, account.nick || 'QQ 音乐账号'),
-          h('div', { class: 'list-sub mono' }, `uin ${account.uin || '-'}`))),
+        h('div', { class: 'grow' }, h('div', { class: 'list-title' }, account.nick || `${targetInfo.name}账号`),
+          h('div', { class: 'list-sub mono' }, `${isWy ? '用户 ID' : 'uin'} ${account.uin || '-'}`)),
+        moduleLogo(isWy ? 'wy' : 'tx')),
       account.has_refresh ? null : h('div', { class: 'notice warn' }, icon('alert'),
         h('div', null, '这次登录没有返回 refresh 凭证，自动刷新登录可能无法续期。')),
       h('div', { class: 'field-label' }, '保存位置'),
@@ -281,7 +322,7 @@ export async function qqLoginPage(ctx) {
       saveButton));
     saveButton.addEventListener('click', () => withLoading(saveButton, async () => {
       try {
-        const data = await api('POST', `/api/admin/qqlogin/${encodeURIComponent(info.id)}/apply`, { target, enable_refresh: enableRefresh });
+        const data = await api('POST', `${API}/${encodeURIComponent(info.id)}/apply`, { target, enable_refresh: enableRefresh });
         if (data.reload_error) toast(`已保存，但热重载失败：${data.reload_error}`, 'error', 9000);
         else toast('已保存到配置', 'success');
         setChildren(side, h('section', { class: 'card result-card' }, h('div', { class: 'card-body stack' },

@@ -14,14 +14,17 @@
 
 import asyncio
 import re
-import secrets
 import time
 from urllib.parse import parse_qs, urljoin, urlsplit
+from uuid import uuid4
 
 import aiohttp
 import ujson as json
 
-from common import config, log, variable
+from common import config, log, login_session, variable
+from common.login_session import (  # noqa: F401  会话管理与网易云登录共用，这里保留原来的名字
+    MAX_ACTIVE_SESSIONS, QR_TIMEOUT, RESULT_TTL, LoginError, LoginSession, _sessions, cancel_session, get_session,
+)
 from .device import load_device
 from .qimei import ensure_qimei
 from .utils import sign
@@ -47,15 +50,14 @@ WECHAT_APP_ID = 'wx48db31d50e334801'
 QQ_CLIENT_ID = '100497308'
 QQ_APP_ID = '716027609'
 PTLOGIN_REFERER = 'https://xui.ptlogin2.qq.com/'
+# ptlogin 的 check_sig 等接口会检查 User-Agent，非浏览器的 UA 拿不到 p_skey，所以所有请求默认都用浏览器 UA
+BROWSER_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+              '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
 QQ_REDIRECT_URI = 'https://y.qq.com/portal/wx_redirect.html?login_type=1&surl=https://y.qq.com/'
 WX_REDIRECT_URI = 'https://y.qq.com/portal/wx_redirect.html?login_type=2&surl=https://y.qq.com/'
 DEFAULT_REFRESH_INTERVAL = 86000
 
-# 登录会话的有效期(秒)
-QR_TIMEOUT = 180  # 二维码有效时间，超时后会话结束
 POLL_INTERVAL = 2  # 轮询二维码状态的间隔(秒)
-RESULT_TTL = 600  # 登录完成后凭证在内存里最多保留多久，期间需要在后台点“保存”
-MAX_ACTIVE_SESSIONS = 5
 SMS_COOLDOWN = 60  # 同一个手机号两次发送验证码的最短间隔
 
 QR_EVENTS = {
@@ -81,13 +83,6 @@ LOGIN_MESSAGES = {
     20450: '账号已被封禁',
     104604: '操作过于频繁',
 }
-
-
-class LoginError(Exception):
-    def __init__(self, message, code=None):
-        super().__init__(message)
-        self.message = message
-        self.code = code
 
 
 # ---------------------------------------------------------------------------
@@ -124,16 +119,20 @@ class _Response:
     def text(self):
         return self.body.decode('utf-8', errors='ignore')
 
-    def cookie(self, name):
-        """取 Set-Cookie 里指定名称最后一次设置的值"""
-        value = ''
+    def cookies(self):
+        """Set-Cookie 里设置的 Cookie；同名的取最后一个非空值(服务端可能先下发一个空值清掉旧 Cookie)"""
+        result = {}
         for line in self.set_cookies:
             first = line.split(';', 1)[0].strip()
             if '=' in first:
                 key, val = first.split('=', 1)
-                if key.strip() == name:
-                    value = val
-        return value
+                key, val = key.strip(), val.strip()
+                if key and val:
+                    result[key] = val
+        return result
+
+    def cookie(self, name):
+        return self.cookies().get(name, '')
 
 
 def new_http_session():
@@ -144,6 +143,7 @@ def new_http_session():
 
 async def _request(http, method, url, *, params=None, data=None, headers=None, cookies=None, timeout=20):
     headers = dict(headers or {})
+    headers.setdefault('User-Agent', BROWSER_UA)
     if cookies:
         # 手动拼 Cookie 头：aiohttp 会对含特殊字符的 Cookie 值加引号，服务端不一定认
         headers['Cookie'] = '; '.join(f'{name}={value}' for name, value in cookies.items())
@@ -170,16 +170,12 @@ def _redirect_allowed(url):
 # CGI 调用与凭证解析
 # ---------------------------------------------------------------------------
 
-YQQ_COMM_BASE = {'platform': 'yqq', 'ct': 24, 'cv': 0}
-
-
 async def cgi_call(http, module, method, param, comm, user_agent=None):
     """调用 QQ 音乐 CGI 接口，返回 (业务码, data)"""
     payload = {'comm': comm, 'req_0': {'module': module, 'method': method, 'param': param}}
     body = json.dumps(payload)
     resp = await _request(http, 'POST', f"{ENDPOINTS['cgi']}?sign={sign(body)}", data=body, headers={
-        'User-Agent': user_agent or 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
-                                    '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'User-Agent': user_agent or BROWSER_UA,
         'Referer': 'https://y.qq.com/',
         'Origin': 'https://y.qq.com',
         'Content-Type': 'application/json',
@@ -240,7 +236,8 @@ async def qq_qr_check(http, qrsig):
     """
     查询 QQ 二维码状态
 
-    @return: (事件, 登录信息)；事件为 scan/conf/done/timeout/refuse，只有 done 时才有登录信息 {uin, sigx}
+    @return: (事件, 登录信息)；事件为 scan/conf/done/timeout/refuse，只有 done 时才有登录信息：
+             {uin, sigx, url: ptlogin 给出的 check_sig 地址, set_cookies: 这次响应下发的 Set-Cookie}
     """
     resp = await _request(http, 'GET', ENDPOINTS['ptqrlogin'], params={
         'u1': 'https://graph.qq.com/oauth2.0/login_jump',
@@ -265,37 +262,94 @@ async def qq_qr_check(http, qrsig):
         return event, None
     if len(args) < 3:
         raise LoginError('获取登录凭据失败: 缺少必要参数')
-    sigx = extract_between(args[2], 'ptsigx=', '&s_url')
-    uin = extract_between(args[2], 'uin=', '&service')
+    # 只认 ?uin= / &uin= 这样的完整参数名，不会误匹配 pt_uin= 之类的参数
+    sigx = re.search(r'[?&]ptsigx=(.+?)&s_url', args[2])
+    uin = re.search(r'[?&]uin=(.+?)&service', args[2])
+    sigx, uin = (sigx.group(1) if sigx else ''), (uin.group(1) if uin else '')
     if not sigx or not uin:
         raise LoginError('获取登录凭据失败: 无法解析必要参数')
-    return event, {'uin': uin, 'sigx': sigx}
+    return event, {'uin': uin, 'sigx': sigx, 'url': args[2], 'set_cookies': list(resp.set_cookies)}
 
 
-async def qq_authorize_code(http, uin, sigx):
-    """扫码确认后，换取 QQ 互联的授权 code"""
+def _cookies_for_host(set_cookies, host):
+    """
+    从 Set-Cookie 里挑出浏览器会带给 host 的 Cookie：只要带 Domain 且域名匹配的；
+    没有 Domain 的只属于下发它的那个主机(ptlogin2.qq.com)，不会被带到别的主机
+    """
+    host = (host or '').lower()
+    result = {}
+    for line in set_cookies or []:
+        parts = [part.strip() for part in line.split(';')]
+        if '=' not in parts[0]:
+            continue
+        name, value = (item.strip() for item in parts[0].split('=', 1))
+        domain = ''
+        for attr in parts[1:]:
+            key, _, val = attr.partition('=')
+            if key.strip().lower() == 'domain':
+                domain = val.strip().lstrip('.').lower()
+        if name and value and domain and (host == domain or host.endswith('.' + domain)):
+            result[name] = value
+    return result
+
+
+def _check_sig_url_allowed(url):
+    """只跟随 ptlogin 给出的 check_sig 地址(qq.com 域名下)，不访问其他地址"""
+    parts = urlsplit(url or '')
+    if not parts.path.endswith('/check_sig'):
+        return False
+    return _redirect_allowed(url) or parts.netloc == urlsplit(ENDPOINTS['check_sig']).netloc
+
+
+def _describe(resp):
+    """一次请求的结果摘要(只有状态码和跳转的域名、路径，不含参数)，用于排查问题"""
+    location = urlsplit(urljoin(resp.url, resp.headers.get('Location', '')))
+    detail = f'HTTP {resp.status}'
+    if location.hostname:
+        detail += f'，跳转到 {location.hostname}{location.path}'
+    return detail
+
+
+async def qq_authorize_code(http, uin, sigx, check_url='', login_set_cookies=()):
+    """
+    扫码确认后，换取 QQ 互联的授权 code
+
+    先按 qqmusic-api-python 的方式请求 check_sig(自己拼参数，不带 Cookie)拿 p_skey；
+    拿不到时再按浏览器的方式重试一次：直接打开 ptlogin 给出的地址，带上登录成功时下发的、浏览器会带的 Cookie
+    """
     resp = await _request(http, 'GET', ENDPOINTS['check_sig'], params={
         'uin': uin, 'pttype': '1', 'service': 'ptqrlogin', 'nodirect': '0', 'ptsigx': sigx,
         's_url': 'https://graph.qq.com/oauth2.0/login_jump', 'ptlang': '2052', 'ptredirect': '100',
         'aid': QQ_APP_ID, 'daid': '383', 'j_later': '0', 'low_login_hour': '0', 'regmaster': '0',
         'pt_login_type': '3', 'pt_aid': '0', 'pt_aaid': '16', 'pt_light': '0', 'pt_3rd_aid': QQ_CLIENT_ID,
     }, headers={'Referer': PTLOGIN_REFERER})
-    p_skey = resp.cookie('p_skey')
+    sig_cookies = resp.cookies()
+    attempts = [_describe(resp)]
+    if not sig_cookies.get('p_skey') and _check_sig_url_allowed(check_url):
+        logger.info('QQ 扫码登录：check_sig 没有返回 p_skey，改用浏览器的方式重试')
+        cookies = _cookies_for_host(login_set_cookies, urlsplit(check_url).hostname)
+        resp = await _request(http, 'GET', check_url, headers={'Referer': PTLOGIN_REFERER}, cookies=cookies)
+        sig_cookies = resp.cookies()
+        attempts.append(_describe(resp))
+    p_skey = sig_cookies.get('p_skey', '')
     if not p_skey:
-        raise LoginError('获取登录凭据失败: 没有拿到 p_skey')
+        # 记下 check_sig 的去向(只记域名和路径，不记参数)，方便判断是参数问题还是 QQ 要求额外验证
+        detail = '；重试：'.join(attempts)
+        logger.warning(f'QQ 扫码登录 check_sig 没有返回 p_skey: {detail}，返回的 Cookie: {sorted(sig_cookies) or "无"}')
+        raise LoginError(f'获取登录凭据失败: 没有拿到 p_skey({detail})')
 
     form = {
         'response_type': 'code', 'client_id': QQ_CLIENT_ID, 'redirect_uri': QQ_REDIRECT_URI,
         'scope': 'get_user_info,get_app_friends', 'state': 'state', 'switch': '', 'from_ptlogin': '1',
         'src': '1', 'update_auth': '1', 'openapi': '1010_1030',
-        'g_tk': str(hash33(p_skey, 5381)), 'auth_time': str(int(time.time() * 1000)),
+        'g_tk': str(hash33(p_skey, 5381)), 'auth_time': str(int(time.time() * 1000)), 'ui': str(uuid4()),
     }
-    cookies = {'uin': uin, 'p_skey': p_skey}
-    headers = {'Referer': PTLOGIN_REFERER}
+    # 带上 check_sig 下发的全部 Cookie(p_skey、p_uin、pt4_token 等)，和浏览器的行为一致
+    cookies = sig_cookies
     method, url, data = 'POST', ENDPOINTS['authorize'], form
     # 手动跟随重定向：一拿到带 code 的地址就停止，不去请求最终的页面
     for _ in range(5):
-        resp = await _request(http, method, url, data=data, headers=headers, cookies=cookies)
+        resp = await _request(http, method, url, data=data, cookies=cookies)
         location = resp.headers.get('Location')
         if not location:
             break
@@ -306,12 +360,15 @@ async def qq_authorize_code(http, uin, sigx):
         if not _redirect_allowed(url):
             raise LoginError('授权过程被重定向到了未知的地址')
         method, data = 'GET', None
-    raise LoginError('获取授权 code 失败')
+    stop = urlsplit(url)
+    logger.warning(f'QQ 扫码登录没有拿到授权 code: HTTP {resp.status}，停在 {stop.hostname}{stop.path}')
+    raise LoginError(f'获取授权 code 失败(HTTP {resp.status})')
 
 
 async def qq_exchange(http, code):
-    comm = dict(YQQ_COMM_BASE, tmeLoginType=2)
-    result_code, data = await cgi_call(http, 'QQConnectLogin.LoginServer', 'QQLogin', {'code': code}, comm)
+    # 和手机验证码登录一样按安卓客户端调用(qqmusic-api-python 默认也是安卓平台)
+    comm, user_agent = await _android_comm({'tmeLoginType': 2})
+    result_code, data = await cgi_call(http, 'QQConnectLogin.LoginServer', 'QQLogin', {'code': code}, comm, user_agent)
     return credential_from_login(result_code, data, 2)
 
 
@@ -367,9 +424,9 @@ async def wx_qr_check(http, uuid):
 
 
 async def wx_exchange(http, code):
-    comm = dict(YQQ_COMM_BASE, tmeLoginType=1)
+    comm, user_agent = await _android_comm({'tmeLoginType': 1})
     result_code, data = await cgi_call(
-        http, 'music.login.LoginServer', 'Login', {'code': code, 'strAppid': WECHAT_APP_ID}, comm)
+        http, 'music.login.LoginServer', 'Login', {'code': code, 'strAppid': WECHAT_APP_ID}, comm, user_agent)
     return credential_from_login(result_code, data, 1)
 
 
@@ -445,83 +502,16 @@ async def phone_login(http, phone, auth_code, country_code='86'):
 # 登录会话(给后台页面使用，全部保存在内存里)
 # ---------------------------------------------------------------------------
 
-class LoginSession:
-    def __init__(self, kind, owner):
-        self.id = secrets.token_urlsafe(16)
-        self.kind = kind  # qq / wx / phone
-        self.owner = owner  # 发起登录的管理员用户名，只有本人能查看和保存
-        self.created_at = time.time()
-        self.finished_at = None
-        self.state = 'scan'  # scan / conf / done / timeout / refuse / error / cancelled / applied
-        self.message = ''
-        self.credential = None
-        self.image = b''
-        self.mimetype = ''
-        self.task = None
-        self.http = None  # 扫码会话持有的 HTTP 会话，结束或取消时必须关闭
-
-    @property
-    def finished(self):
-        return self.state not in ('scan', 'conf')
-
-    def finish(self, state, message=''):
-        self.state = state
-        self.message = message
-        self.finished_at = time.time()
-
-    def public(self):
-        info = {'id': self.id, 'kind': self.kind, 'state': self.state, 'message': self.message}
-        if self.credential:
-            info['account'] = {'uin': self.credential['uin'], 'nick': self.credential.get('nick', ''),
-                               'has_refresh': bool(self.credential.get('refresh_key')
-                                                   or self.credential.get('refresh_token'))}
-        return info
-
-
-_sessions = {}
 _sms_last_sent = {}
-_closing = set()
-
-
-def _stop_session(ls):
-    """停止后台轮询并关闭它的 HTTP 会话。任务还没开始执行就被取消时，任务里的 finally 不会运行，所以这里要补一次关闭"""
-    if ls.task and not ls.task.done():
-        ls.task.cancel()
-    if ls.http is not None:
-        closing = asyncio.ensure_future(ls.http.close())
-        _closing.add(closing)
-        closing.add_done_callback(_closing.discard)
-        ls.http = None
+_stop_session = login_session.stop_session
 
 
 def _purge(now=None):
+    login_session.purge(now)
     now = time.time() if now is None else now
-    for sid, ls in list(_sessions.items()):
-        expired = (now - ls.created_at > QR_TIMEOUT + RESULT_TTL) or \
-                  (ls.finished_at is not None and now - ls.finished_at > RESULT_TTL)
-        if expired:
-            _stop_session(ls)
-            _sessions.pop(sid, None)
     for key, ts in list(_sms_last_sent.items()):
         if now - ts > SMS_COOLDOWN:
             _sms_last_sent.pop(key, None)
-
-
-def get_session(sid, owner):
-    ls = _sessions.get(sid)
-    if ls and ls.owner == owner:
-        return ls
-    return None
-
-
-def cancel_session(sid, owner):
-    ls = get_session(sid, owner)
-    if not ls:
-        return False
-    _stop_session(ls)
-    if not ls.finished:
-        ls.finish('cancelled', '已取消')
-    return True
 
 
 async def _poll_qr(ls, http, identifier):
@@ -536,7 +526,9 @@ async def _poll_qr(ls, http, identifier):
             if event == 'done':
                 ls.state = 'conf'
                 if ls.kind == 'qq':
-                    code = await qq_authorize_code(http, info['uin'], info['sigx'])
+                    logger.info('QQ 扫码登录：手机已确认，正在换取登录凭证')
+                    code = await qq_authorize_code(http, info['uin'], info['sigx'], info.get('url', ''),
+                                                   info.get('set_cookies', ()))
                     ls.credential = await qq_exchange(http, code)
                 else:
                     ls.credential = await wx_exchange(http, info)
@@ -565,8 +557,7 @@ async def start_qr(kind, owner):
     if kind not in ('qq', 'wx'):
         raise LoginError('不支持的登录方式')
     _purge()
-    if len([s for s in _sessions.values() if not s.finished]) >= MAX_ACTIVE_SESSIONS:
-        raise LoginError('同时进行的扫码登录太多，请稍后再试')
+    login_session.ensure_capacity()
     http = new_http_session()
     try:
         if kind == 'qq':
@@ -579,7 +570,7 @@ async def start_qr(kind, owner):
     ls = LoginSession(kind, owner)
     ls.image, ls.mimetype = image, mimetype
     ls.http = http
-    _sessions[ls.id] = ls
+    login_session.register(ls)
     ls.task = asyncio.ensure_future(_poll_qr(ls, http, identifier))
     return ls
 
@@ -610,8 +601,7 @@ async def phone_verify(owner, phone, auth_code, country_code='86'):
     ls = LoginSession('phone', owner)
     ls.credential = credential
     ls.finish('done', '登录成功')
-    _sessions[ls.id] = ls
-    return ls
+    return login_session.register(ls)
 
 
 # ---------------------------------------------------------------------------
