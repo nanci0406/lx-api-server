@@ -9,7 +9,7 @@ import { configPage } from './pages/config.js';
 import { usersPage } from './pages/users.js';
 import { statsPage } from './pages/stats.js';
 import { healthPage } from './pages/health.js';
-import { qqLoginPage } from './pages/qqlogin.js';
+import { musicLoginPage } from './pages/musiclogin.js';
 import { accountPage } from './pages/account.js';
 
 const NAV = [
@@ -21,10 +21,12 @@ const NAV = [
   { path: '/admin/stats', label: '统计', icon: 'chart', page: statsPage, bottom: true },
   { path: '/admin/health', label: '模块状态', icon: 'pulse', page: healthPage, badge: 'health' },
   { section: '账号' },
-  { path: '/admin/qqlogin', label: 'QQ 登录', icon: 'qr', page: qqLoginPage },
+  { path: '/admin/music-login', label: '音乐账号', icon: 'qr', page: musicLoginPage },
   { path: '/admin/account', label: '账号安全', icon: 'shield', page: accountPage },
 ];
 const ROUTES = NAV.filter((item) => item.path);
+// 改过名的页面：旧地址自动跳到新地址
+const ALIASES = { '/admin/qqlogin': '/admin/music-login' };
 
 const app = document.getElementById('app');
 const state = { me: null, page: null, guard: null, shell: null, renderToken: 0 };
@@ -69,23 +71,24 @@ function renderLogin() {
   const password = passwordInput({ name: 'password', autocomplete: 'current-password', placeholder: '密码' });
   const error = h('div', { class: 'field-error', role: 'alert' });
   const submit = h('button', { class: 'btn primary lg block', type: 'submit' }, '登录');
+  const panel = h('div', { class: 'auth-panel stack' },
+    field({ label: '用户名', control: username }),
+    field({ label: '密码', control: password }),
+    error,
+    submit);
   const card = h('form', { class: 'auth-card', novalidate: true },
     h('div', { class: 'brand-mark' }, icon('logo')),
     h('h1', null, '欢迎回来'),
     h('p', { class: 'sub' }, '登录 LX API Server 管理后台'),
-    h('div', { class: 'stack' },
-      field({ label: '用户名', control: username }),
-      field({ label: '密码', control: password }),
-      error,
-      submit),
-    h('div', { class: 'auth-foot' }, h('a', { href: '/' }, '返回首页')));
+    panel,
+    h('div', { class: 'auth-foot' }, h('a', { href: '/' }, '← 返回首页')));
 
   card.addEventListener('submit', async (event) => {
     event.preventDefault();
     error.textContent = '';
     if (!username.value.trim() || !password.input.value) {
       error.textContent = '请输入用户名和密码';
-      shake(card);
+      shake(panel);
       return;
     }
     await withLoading(submit, async () => {
@@ -102,14 +105,13 @@ function renderLogin() {
       } catch (e) {
         error.textContent = e.message;
         password.input.select();
-        shake(card);
+        shake(panel);
       }
     });
   });
 
   setChildren(app,
     h('div', { class: 'auth' },
-      h('div', { class: 'blob a' }), h('div', { class: 'blob b' }), h('div', { class: 'blob c' }),
       h('div', { class: 'auth-theme' }, themeButton()),
       card));
   state.shell = null;
@@ -219,7 +221,7 @@ async function refreshBadges() {
 
 function findRoute(path) {
   const clean = path.replace(/\/+$/, '') || '/admin';
-  return ROUTES.find((item) => item.path === clean) || null;
+  return ROUTES.find((item) => item.path === (ALIASES[clean] || clean)) || null;
 }
 
 async function canLeave() {
@@ -253,6 +255,8 @@ function route(path) {
   if (!item) {
     item = ROUTES[0];
     history.replaceState(null, '', item.path);
+  } else if (item.path !== (path.replace(/\/+$/, '') || '/admin')) {
+    history.replaceState(null, '', item.path + location.search + location.hash); // 旧地址换成新地址
   }
   cleanupPage();
   toggleDrawer(false);

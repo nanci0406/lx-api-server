@@ -69,7 +69,7 @@ LX_ADMIN_USERNAME=admin LX_ADMIN_PASSWORD=your-password python main.py
 - 用户（`/admin/users`）：新建/停用/删除用户、重置 Key、复制音源脚本链接，查看每位用户的解析次数和成功率
 - 统计（`/admin/stats`）：今天/近 7 天/近 30 天的趋势、平台分布、用户排行，解析记录可按用户/平台/结果筛选
 - 模块状态（`/admin/health`）：各平台状态、定时任务（刷新登录、签到、清理记录）的执行情况，可以立即检查、立即执行任务
-- QQ 登录（`/admin/qqlogin`）：见下文“QQ 音乐登录”
+- 音乐账号（`/admin/music-login`，旧地址 `/admin/qqlogin` 会自动跳转）：扫码登录 QQ 音乐和网易云音乐，见下文“音乐账号登录”
 - 账号安全（`/admin/account`）：修改管理员密码、退出其他设备上的登录
 
 后台是单页应用，前端只调用 `/api/admin/*` JSON 接口；不依赖任何外部 CDN，可以在内网离线使用。
@@ -159,7 +159,9 @@ module:
 
 网易云刷新登录成功后，服务端返回的新登录 cookie（`MUSIC_U` 等）会合并写回配置里的 cookie（其余字段保持不变）；酷狗会写回新的 `userid` 和 `token`。
 
-刷新登录用哪种请求，优先看配置里的 `login_type`（1 微信、2 QQ，通过后台“QQ 登录”页登录时会自动保存），没有时才按 `qqmusic_key` 的前缀（`W_X` 微信、`Q_H_L` QQ）判断，两者都不是则走通用的刷新接口。手动配置的账号不用填 `login_type`。
+网易云的刷新请求参照 [NeteaseCloudMusicApi](https://www.npmjs.com/package/NeteaseCloudMusicApi) 的 `login_refresh`：走 `https://interface.music.163.com/eapi/login/token/refresh`，cookie 里没有 `os`、`appver`、`deviceId` 等客户端信息时按 PC 客户端补齐（从浏览器复制的 cookie 就属于这种情况）。刷新返回 `301` 表示 `MUSIC_U` 已经失效，刷新救不回来，需要到后台“音乐账号”页重新扫码登录。
+
+刷新登录用哪种请求，优先看配置里的 `login_type`（1 微信、2 QQ，通过后台“音乐账号”页登录时会自动保存），没有时才按 `qqmusic_key` 的前缀（`W_X` 微信、`Q_H_L` QQ）判断，两者都不是则走通用的刷新接口。手动配置的账号不用填 `login_type`。
 
 刷新失败（请求出错、返回非 0 业务码等）不会干等一个完整周期，而是按 1 分钟、5 分钟、30 分钟、2 小时的间隔退避重试（不超过任务自身的刷新间隔），成功后恢复正常周期。连续失败的任务会在后台“模块状态”页的“定时任务状态”里显示，对应模块也会标记为“降级”。
 
@@ -186,9 +188,19 @@ scheduler loaded 2 task(s): qqmusic_refresh_login_pooled_0, parse_logs_cleanup
 
 后台保存配置（表单或原始配置）后会立即热重载配置并重建定时任务。刷新登录任务会按最新配置重新注册，cookie 池账号会在任务执行时读取当前配置，避免继续使用启动时的旧 token/key/session。
 
-## QQ 音乐登录
+## 音乐账号登录
 
-后台“QQ 登录”页（`/admin/qqlogin`）支持三种方式登录 QQ 音乐：
+后台“音乐账号”页（`/admin/music-login`）可以登录 QQ 音乐和网易云音乐，登录后选择保存为主账号或加入 cookie 池，并可同时开启自动刷新登录。保存后配置会自动热重载，刷新任务立即生效。
+
+### 网易云音乐
+
+用网易云音乐 App 的“扫一扫”扫描页面上的二维码并确认即可（流程参照 NeteaseCloudMusicApi 的 `login_qr_key` / `login_qr_check`）。登录成功后网易云下发的 `MUSIC_U`、`__csrf` 等 cookie 会连同这次登录使用的客户端信息（`os`、`appver`、`deviceId` 等）一起保存到 `module.wy.user.cookie`（或 `module.cookiepool.wy`，同一个账号再次加入会按用户 ID 覆盖）。之后的解析和刷新登录都沿用这台“设备”。
+
+二维码在服务端生成，需要安装依赖 `qrcode`（已写进 `requirements.txt`，升级后请重新执行 `pip install -r requirements.txt`）。如果网易云返回需要安全验证（风控），页面会提示稍后再试。
+
+### QQ 音乐
+
+支持三种方式登录 QQ 音乐：
 
 - QQ 扫码
 - 微信扫码

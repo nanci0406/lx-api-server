@@ -48,7 +48,7 @@ SECTIONS = [
              'placeholder': 'http://127.0.0.1:7890'},
             {'key': 'common.cookiepool', 'label': '启用账号池(cookie 池)', 'type': 'bool',
              'help': '开启后各平台使用 module.cookiepool 里的多个账号，单账号配置会被忽略。账号池可在“原始配置”里编辑，'
-                     'QQ 音乐账号也可以在“QQ 登录”页直接加入'},
+                     'QQ 音乐和网易云账号也可以在“音乐账号”页扫码后直接加入'},
             {'key': 'common.debug_mode', 'label': '调试日志', 'type': 'bool', 'restart': True},
             {'key': 'common.log_length_limit', 'label': '单条日志最大长度', 'type': 'int', 'min': 50, 'max': 100000},
             {'key': 'common.parse_log_retention_days', 'label': '解析记录保留天数', 'type': 'int', 'min': 0, 'max': 3650,
@@ -107,7 +107,7 @@ SECTIONS = [
     },
     {
         'id': 'tx', 'title': 'QQ 音乐', 'icon': 'music',
-        'description': '账号凭证推荐通过“QQ 登录”页扫码获取，会自动填写下面的字段。',
+        'description': '账号凭证推荐通过“音乐账号”页扫码获取，会自动填写下面的字段。',
         'fields': [
             {'key': 'module.tx.enable', 'label': '启用 QQ 音乐', 'type': 'bool'},
             {'key': 'module.tx.user.uin', 'label': 'uin(QQ 号)', 'type': 'text'},
@@ -154,7 +154,7 @@ SECTIONS = [
     },
     {
         'id': 'wy', 'title': '网易云音乐', 'icon': 'music',
-        'description': '浏览器登录 music.163.com 后复制完整 Cookie。',
+        'description': '推荐在“音乐账号”页用网易云音乐 App 扫码登录，会自动填写 Cookie；也可以从浏览器复制完整 Cookie。',
         'fields': [
             {'key': 'module.wy.enable', 'label': '启用网易云音乐', 'type': 'bool'},
             {'key': 'module.wy.user.cookie', 'label': 'Cookie', 'type': 'secret', 'multiline': True},

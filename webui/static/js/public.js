@@ -27,7 +27,7 @@ async function main() {
       h('span', { class: 'spacer' }), themeButton(),
       h('a', { class: 'btn sm', href: '/admin' }, icon('lock'), '管理后台')),
     h('header', { class: 'hero' },
-      h('h1', null, '多平台音乐解析，', h('span', { class: 'grad' }, '一个地址搞定')),
+      h('h1', null, '多平台音乐解析，', h('span', { class: 'accent' }, '一个地址搞定')),
       h('p', null, '为 LX Music 提供 QQ 音乐、酷狗音乐、网易云音乐的播放链接解析。使用管理员分配的用户名和 Key 即可接入。')),
     statusStrip,
     h('div', { class: 'grid cols-2 public-grid' }, resolveCard, scriptCard),

@@ -18,9 +18,10 @@ import time
 
 import ruamel.yaml as yaml_
 
-from common import config, db, scheduler, variable
+from common import config, db, login_session, scheduler, variable
 from common.services import admin_auth, module_health, stats_service, users_service
 from modules.tx import login as qq_login
+from modules.wy import login as wy_login
 
 from . import config_schema
 from .http import check_same_origin, client_ip, current_token, fail, ok, read_json, require_admin
@@ -437,7 +438,7 @@ async def logout_others(request):
 
 
 # ---------------------------------------------------------------------------
-# QQ 音乐登录
+# 音乐平台登录(QQ 音乐扫码/验证码、网易云扫码)
 # ---------------------------------------------------------------------------
 
 def _safe_security_url(url):
@@ -451,31 +452,35 @@ def _safe_security_url(url):
 
 
 def _login_session(request, session):
-    ls = qq_login.get_session(request.match_info['session_id'], session['username'])
+    ls = login_session.get_session(request.match_info['session_id'], session['username'])
     if not ls:
         fail(404, '登录会话不存在或已过期')
     return ls
 
 
-async def qq_start_qr(request):
+async def login_start_qr(request):
     session = require_admin(request, write=True)
     data = await read_json(request)
+    kind = str(data.get('kind') or '')
     try:
-        ls = await qq_login.start_qr(str(data.get('kind') or ''), session['username'])
-    except qq_login.LoginError as e:
+        if kind == 'wy':
+            ls = await wy_login.start_qr(session['username'])
+        else:
+            ls = await qq_login.start_qr(kind, session['username'])
+    except login_session.LoginError as e:
         fail(400, e.message)
     image = f"data:{ls.mimetype};base64,{base64.b64encode(ls.image).decode('ascii')}"
-    return ok(dict(ls.public(), image=image, expires_in=qq_login.QR_TIMEOUT))
+    return ok(dict(ls.public(), image=image, expires_in=login_session.QR_TIMEOUT))
 
 
-async def qq_status(request):
+async def login_status(request):
     session = require_admin(request)
     return ok(_login_session(request, session).public())
 
 
-async def qq_cancel(request):
+async def login_cancel(request):
     session = require_admin(request, write=True)
-    qq_login.cancel_session(request.match_info['session_id'], session['username'])
+    login_session.cancel_session(request.match_info['session_id'], session['username'])
     return ok()
 
 
@@ -484,7 +489,7 @@ async def qq_phone_send(request):
     data = await read_json(request)
     try:
         result = await qq_login.phone_send(session['username'], data.get('phone', ''), data.get('country_code', '86'))
-    except qq_login.LoginError as e:
+    except login_session.LoginError as e:
         fail(400, e.message)
     if 'url' in result:
         result['url'] = _safe_security_url(result['url'])
@@ -497,18 +502,19 @@ async def qq_phone_verify(request):
     try:
         ls = await qq_login.phone_verify(session['username'], data.get('phone', ''), data.get('code', ''),
                                          data.get('country_code', '86'))
-    except qq_login.LoginError as e:
+    except login_session.LoginError as e:
         fail(400, e.message)
     return ok(ls.public())
 
 
-async def qq_apply(request):
+async def login_apply(request):
     session = require_admin(request, write=True)
     ls = _login_session(request, session)
     data = await read_json(request)
+    platform_login = wy_login if ls.platform == 'wy' else qq_login
     try:
-        note = qq_login.apply_credential(ls, str(data.get('target') or ''), bool(data.get('enable_refresh')))
-    except qq_login.LoginError as e:
+        note = platform_login.apply_credential(ls, str(data.get('target') or ''), bool(data.get('enable_refresh')))
+    except login_session.LoginError as e:
         fail(400, e.message)
     reload_error = None
     try:
@@ -541,9 +547,9 @@ def register(app):
     r.add_post('/api/admin/tasks/{name}/run', run_task)
     r.add_post('/api/admin/account/password', change_password)
     r.add_post('/api/admin/account/logout-others', logout_others)
-    r.add_post('/api/admin/qqlogin/qr', qq_start_qr)
-    r.add_post('/api/admin/qqlogin/phone/send', qq_phone_send)
-    r.add_post('/api/admin/qqlogin/phone/verify', qq_phone_verify)
-    r.add_get('/api/admin/qqlogin/{session_id}', qq_status)
-    r.add_post('/api/admin/qqlogin/{session_id}/cancel', qq_cancel)
-    r.add_post('/api/admin/qqlogin/{session_id}/apply', qq_apply)
+    r.add_post('/api/admin/music-login/qr', login_start_qr)
+    r.add_post('/api/admin/music-login/phone/send', qq_phone_send)
+    r.add_post('/api/admin/music-login/phone/verify', qq_phone_verify)
+    r.add_get('/api/admin/music-login/{session_id}', login_status)
+    r.add_post('/api/admin/music-login/{session_id}/cancel', login_cancel)
+    r.add_post('/api/admin/music-login/{session_id}/apply', login_apply)

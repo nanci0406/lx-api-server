@@ -27,8 +27,12 @@ export async function healthPage(ctx) {
           statusPill(m.status)),
         h('div', { class: 'muted' }, m.detail || ''),
         m.admin_detail ? h('div', { class: 'notice warn' }, icon('alert'), h('div', null, m.admin_detail)) : null,
-        m.status === 'misconfigured' || m.status === 'disabled'
-          ? h('a', { class: 'btn sm', href: `/admin/config#${m.source}`, 'data-link': true }, icon('sliders'), '去配置') : null)));
+        h('div', { class: 'row wrap' },
+          (m.source === 'tx' || m.source === 'wy') && m.status !== 'healthy' && m.status !== 'disabled'
+            ? h('a', { class: 'btn sm primary', href: `/admin/music-login${m.source === 'wy' ? '?platform=wy' : ''}`, 'data-link': true },
+              icon('qr'), '扫码登录') : null,
+          m.status !== 'healthy'
+            ? h('a', { class: 'btn sm', href: `/admin/config#${m.source}`, 'data-link': true }, icon('sliders'), '去配置') : null))));
     setChildren(modulesEl, cards.length ? cards : h('div', { class: 'card span-2' }, emptyState('pulse', '还没有检查结果', '点击「立即检查」')));
     if (first) stagger(modulesEl);
 

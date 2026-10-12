@@ -10,3 +10,4 @@ mutagen
 pillow
 colorama
 ruamel-yaml
+qrcode>=7.4

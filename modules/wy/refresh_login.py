@@ -7,19 +7,23 @@
 # ----------------------------------------
 # This file is part of the "lx-music-api-server" project.
 
-from common import Httpx, variable
+from common import variable
 from common import scheduler
 from common import config
 from common import log
 from common.exceptions import FailedException
-from time import time
-from random import randint
 from email.utils import parsedate_to_datetime
 from datetime import datetime, timezone
-from .encrypt import eapiEncrypt
-import ujson as json
+from . import client
 
 logger = log.log("wy_refresh_login")
+
+# 刷新登录接口常见的失败业务码
+REFRESH_ERRORS = {
+    301: "登录已失效(MUSIC_U 无效或已过期)，刷新救不回来，请重新登录(后台“音乐账号”页可以扫码登录网易云)",
+    -462: "触发了网易云的安全验证，请稍后再试，或重新扫码登录",
+    8821: "触发了网易云的安全验证，请稍后再试，或重新扫码登录",
+}
 
 
 def cookieStr2Dict(cookieStr):
@@ -33,13 +37,6 @@ def cookieStr2Dict(cookieStr):
         except:
             continue
     return cookieDict
-
-
-def cookieDict2Str(cookieDict):
-    cookieStr = ""
-    for name, value in cookieDict.items():
-        cookieStr += f"{name}={value}; "
-    return cookieStr
 
 
 def parseSetCookie(set_cookie_headers):
@@ -114,41 +111,16 @@ async def refresh(cookie: str = None, index = None):
         return
     used_cookie = cookie
     cookie = cookieStr2Dict(cookie)
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0"
-    }
-    baseUrl = "http://interface.music.163.com/eapi/"
-    path = "/api/login/token/refresh"
-    header = {
-        "osver": cookie.get("osver", "17.4.1"),
-        "deviceId": cookie.get("deviceId",""),
-        "os": cookie.get("os","ios"),
-        "appver": cookie.get("appver", ("9.0.65" if cookie.get("os") != "pc" else "")),
-        "versioncode": cookie.get("versioncode", "140"),
-        "mobilename": cookie.get("mobilename", ""),
-        "buildver": cookie.get("buildver", str(time())[:10]),
-        "resolution": cookie.get("resolution", "1920x1080"),
-        "__csrf": cookie.get("__csrf", ""),
-        "channel": cookie.get("channel", ""),
-        "requestId": str(time() * 1000)[:13] + "_" + f"{randint(0, 9999):0>4}",
-    }
-    if cookie.get("MUSIC_U"):
-        header["MUSIC_U"] = cookie.get("MUSIC_U")
-    if cookie.get("MUSIC_A"):
-        header["MUSIC_A"] = cookie.get("MUSIC_A")
-    headers["Cookie"] = cookieDict2Str(header)
+    if not cookie.get("MUSIC_U"):
+        raise FailedException("网易云刷新登录失败：cookie 里没有 MUSIC_U，请重新登录")
 
-    req = await Httpx.AsyncRequest(
-        baseUrl + path[5:],
-        {
-            "method": "POST",
-            "headers": headers,
-            "form": eapiEncrypt(path, json.dumps({"header": header, "e_r": False})),
-        }
-    )
-    body = req.json()
-    if int(body["code"]) != 200:
-        raise FailedException("网易云刷新登录失败(code: " + str(body["code"]) + ")")
+    # 请求参数按 NeteaseCloudMusicApi 的方式填写(https、PC 客户端信息、deviceId)，
+    # 以前用 http + iOS 字段 + 桌面浏览器 UA，而且 deviceId 为空，参数前后不一致
+    req = await client.eapi_request("/api/login/token/refresh", {}, cookie)
+    code, _ = client.response_code(req)
+    if code != 200:
+        hint = REFRESH_ERRORS.get(code)
+        raise FailedException(f"网易云刷新登录失败(code: {code})" + (f"：{hint}" if hint else ""))
 
     updates = parseSetCookie(req.set_cookies)
     if not updates:

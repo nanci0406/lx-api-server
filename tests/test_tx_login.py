@@ -75,9 +75,13 @@ class FakeQQServer:
 
     async def check_sig(self, request):
         self._log(request)
-        response = web.Response(status=302, headers={'Location': 'https://y.qq.com/'})
-        if self.set_p_skey:
-            response.headers.add('Set-Cookie', 'p_skey=PSKEY_VALUE; Path=/')
+        response = web.Response(status=302, headers={'Location': 'https://graph.qq.com/oauth2.0/login_jump?x=1'})
+        # 和真实接口一样：不是浏览器的 User-Agent 拿不到 p_skey；先下发一个空值清掉旧 Cookie，再下发新值
+        if self.set_p_skey and 'Mozilla/5.0' in request.headers.get('User-Agent', ''):
+            response.headers.add('Set-Cookie', 'p_skey=; Path=/; Domain=qq.com')
+            response.headers.add('Set-Cookie', 'p_skey=PSKEY_VALUE; Path=/; Domain=graph.qq.com')
+            response.headers.add('Set-Cookie', 'p_uin=o0123456; Path=/; Domain=graph.qq.com')
+            response.headers.add('Set-Cookie', 'pt4_token=T4*TOKEN; Path=/; Domain=graph.qq.com')
         return response
 
     async def authorize(self, request):
@@ -209,8 +213,11 @@ class QqQrTest(LoginTestCase):
         self.assertEqual(poll['query']['ptqrtoken'], str(login.hash33(QRSIG)))
         check_sig = by_path['/check_sig']
         self.assertEqual((check_sig['query']['uin'], check_sig['query']['ptsigx']), ('123456', 'SIGX_VALUE'))
+        for request in (poll, check_sig):
+            self.assertEqual(request['headers']['User-Agent'], login.BROWSER_UA)
         authorize = by_path['/authorize']
-        self.assertEqual(authorize['headers']['Cookie'], 'uin=123456; p_skey=PSKEY_VALUE')
+        # check_sig 下发的 Cookie 原样带给 authorize(空值不覆盖，特殊字符不加引号)
+        self.assertEqual(authorize['headers']['Cookie'], 'p_skey=PSKEY_VALUE; p_uin=o0123456; pt4_token=T4*TOKEN')
         self.assertEqual(authorize['form']['g_tk'], str(login.hash33('PSKEY_VALUE', 5381)))
         self.assertEqual(authorize['form']['client_id'], login.QQ_CLIENT_ID)
         exchange = self.cgi_requests()[0]['body']
@@ -231,6 +238,14 @@ class QqQrTest(LoginTestCase):
         ls = await login.start_qr('qq', 'admin')
         await self.wait_for(ls, ('error',))
         self.assertIn('p_skey', ls.message)
+        self.assertIn('HTTP 302，跳转到 graph.qq.com/oauth2.0/login_jump', ls.message)  # 不带参数
+        self.assertNotIn('x=1', ls.message)
+
+    async def test_uin_is_read_from_the_exact_parameter(self):
+        self.fake.qq_states = [ptui(0, 'https://x/check_sig?pt_uin=999&uin=42&service=ptqrlogin&ptsigx=S&s_url=u')]
+        async with login.new_http_session() as http:
+            event, info = await login.qq_qr_check(http, QRSIG)
+        self.assertEqual((event, info), ('done', {'uin': '42', 'sigx': 'S'}))
 
     async def test_unparseable_poll_response_is_an_error(self):
         self.fake.qq_states = ['<html>not ptuiCB</html>']
