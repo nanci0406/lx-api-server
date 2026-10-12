@@ -213,6 +213,7 @@ scheduler loaded 2 task(s): qqmusic_refresh_login_pooled_0, parse_logs_cleanup
 - 登录得到的凭证只在服务端内存里保留 10 分钟，点击“保存到配置”后才会写入配置文件；状态接口不会返回凭证本身。
 - 手机号登录会用到一份模拟的安卓设备信息，保存在 `config/tx_device.json`（含向官方申请的 QIMEI，24 小时刷新一次），请不要删除或公开。
 - 暂不支持“手机 QQ 音乐客户端扫码”这种需要 MQTT 的登录方式。
+- 扫码确认后，先按 qqmusic-api-python 的方式请求 `check_sig` 拿 `p_skey`，拿不到时再按浏览器的方式（直接打开 ptlogin 给出的地址并带上相应 Cookie）重试一次；换取凭证和手机验证码登录一样按安卓客户端调用。如果仍然提示“没有拿到 p_skey”，错误信息和日志里会写明每次请求的状态码和跳转去向（不含参数），可以据此排查。
 - 登录协议参考了 [YAQMC/qm-api-rs](https://github.com/YAQMC/qm-api-rs)（GPL-3.0）的文档与行为，代码是独立实现的，没有复制其源码；QIMEI/设备信息部分参考了同源项目 [MeoProject/lx-music-api-server](https://github.com/MeoProject/lx-music-api-server)（MIT）。
 
 ## 模块状态

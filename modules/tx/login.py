@@ -170,9 +170,6 @@ def _redirect_allowed(url):
 # CGI 调用与凭证解析
 # ---------------------------------------------------------------------------
 
-YQQ_COMM_BASE = {'platform': 'yqq', 'ct': 24, 'cv': 0}
-
-
 async def cgi_call(http, module, method, param, comm, user_agent=None):
     """调用 QQ 音乐 CGI 接口，返回 (业务码, data)"""
     payload = {'comm': comm, 'req_0': {'module': module, 'method': method, 'param': param}}
@@ -239,7 +236,8 @@ async def qq_qr_check(http, qrsig):
     """
     查询 QQ 二维码状态
 
-    @return: (事件, 登录信息)；事件为 scan/conf/done/timeout/refuse，只有 done 时才有登录信息 {uin, sigx}
+    @return: (事件, 登录信息)；事件为 scan/conf/done/timeout/refuse，只有 done 时才有登录信息：
+             {uin, sigx, url: ptlogin 给出的 check_sig 地址, set_cookies: 这次响应下发的 Set-Cookie}
     """
     resp = await _request(http, 'GET', ENDPOINTS['ptqrlogin'], params={
         'u1': 'https://graph.qq.com/oauth2.0/login_jump',
@@ -270,11 +268,55 @@ async def qq_qr_check(http, qrsig):
     sigx, uin = (sigx.group(1) if sigx else ''), (uin.group(1) if uin else '')
     if not sigx or not uin:
         raise LoginError('获取登录凭据失败: 无法解析必要参数')
-    return event, {'uin': uin, 'sigx': sigx}
+    return event, {'uin': uin, 'sigx': sigx, 'url': args[2], 'set_cookies': list(resp.set_cookies)}
 
 
-async def qq_authorize_code(http, uin, sigx):
-    """扫码确认后，换取 QQ 互联的授权 code"""
+def _cookies_for_host(set_cookies, host):
+    """
+    从 Set-Cookie 里挑出浏览器会带给 host 的 Cookie：只要带 Domain 且域名匹配的；
+    没有 Domain 的只属于下发它的那个主机(ptlogin2.qq.com)，不会被带到别的主机
+    """
+    host = (host or '').lower()
+    result = {}
+    for line in set_cookies or []:
+        parts = [part.strip() for part in line.split(';')]
+        if '=' not in parts[0]:
+            continue
+        name, value = (item.strip() for item in parts[0].split('=', 1))
+        domain = ''
+        for attr in parts[1:]:
+            key, _, val = attr.partition('=')
+            if key.strip().lower() == 'domain':
+                domain = val.strip().lstrip('.').lower()
+        if name and value and domain and (host == domain or host.endswith('.' + domain)):
+            result[name] = value
+    return result
+
+
+def _check_sig_url_allowed(url):
+    """只跟随 ptlogin 给出的 check_sig 地址(qq.com 域名下)，不访问其他地址"""
+    parts = urlsplit(url or '')
+    if not parts.path.endswith('/check_sig'):
+        return False
+    return _redirect_allowed(url) or parts.netloc == urlsplit(ENDPOINTS['check_sig']).netloc
+
+
+def _describe(resp):
+    """一次请求的结果摘要(只有状态码和跳转的域名、路径，不含参数)，用于排查问题"""
+    location = urlsplit(urljoin(resp.url, resp.headers.get('Location', '')))
+    detail = f'HTTP {resp.status}'
+    if location.hostname:
+        detail += f'，跳转到 {location.hostname}{location.path}'
+    return detail
+
+
+async def qq_authorize_code(http, uin, sigx, check_url='', login_set_cookies=()):
+    """
+    扫码确认后，换取 QQ 互联的授权 code
+
+    先按 qqmusic-api-python 的方式请求 check_sig(自己拼参数，不带 Cookie)拿 p_skey；
+    拿不到时再按浏览器的方式重试一次：直接打开 ptlogin 给出的地址，带上登录成功时下发的、浏览器会带的 Cookie
+    """
     resp = await _request(http, 'GET', ENDPOINTS['check_sig'], params={
         'uin': uin, 'pttype': '1', 'service': 'ptqrlogin', 'nodirect': '0', 'ptsigx': sigx,
         's_url': 'https://graph.qq.com/oauth2.0/login_jump', 'ptlang': '2052', 'ptredirect': '100',
@@ -282,15 +324,18 @@ async def qq_authorize_code(http, uin, sigx):
         'pt_login_type': '3', 'pt_aid': '0', 'pt_aaid': '16', 'pt_light': '0', 'pt_3rd_aid': QQ_CLIENT_ID,
     }, headers={'Referer': PTLOGIN_REFERER})
     sig_cookies = resp.cookies()
+    attempts = [_describe(resp)]
+    if not sig_cookies.get('p_skey') and _check_sig_url_allowed(check_url):
+        logger.info('QQ 扫码登录：check_sig 没有返回 p_skey，改用浏览器的方式重试')
+        cookies = _cookies_for_host(login_set_cookies, urlsplit(check_url).hostname)
+        resp = await _request(http, 'GET', check_url, headers={'Referer': PTLOGIN_REFERER}, cookies=cookies)
+        sig_cookies = resp.cookies()
+        attempts.append(_describe(resp))
     p_skey = sig_cookies.get('p_skey', '')
     if not p_skey:
         # 记下 check_sig 的去向(只记域名和路径，不记参数)，方便判断是参数问题还是 QQ 要求额外验证
-        location = urlsplit(urljoin(resp.url, resp.headers.get('Location', '')))
-        detail = f'HTTP {resp.status}'
-        if location.hostname:
-            detail += f'，跳转到 {location.hostname}{location.path}'
-        logger.warning(f'QQ 扫码登录 check_sig 没有返回 p_skey: {detail}，'
-                       f'返回的 Cookie: {sorted(sig_cookies) or "无"}')
+        detail = '；重试：'.join(attempts)
+        logger.warning(f'QQ 扫码登录 check_sig 没有返回 p_skey: {detail}，返回的 Cookie: {sorted(sig_cookies) or "无"}')
         raise LoginError(f'获取登录凭据失败: 没有拿到 p_skey({detail})')
 
     form = {
@@ -321,8 +366,9 @@ async def qq_authorize_code(http, uin, sigx):
 
 
 async def qq_exchange(http, code):
-    comm = dict(YQQ_COMM_BASE, tmeLoginType=2)
-    result_code, data = await cgi_call(http, 'QQConnectLogin.LoginServer', 'QQLogin', {'code': code}, comm)
+    # 和手机验证码登录一样按安卓客户端调用(qqmusic-api-python 默认也是安卓平台)
+    comm, user_agent = await _android_comm({'tmeLoginType': 2})
+    result_code, data = await cgi_call(http, 'QQConnectLogin.LoginServer', 'QQLogin', {'code': code}, comm, user_agent)
     return credential_from_login(result_code, data, 2)
 
 
@@ -378,9 +424,9 @@ async def wx_qr_check(http, uuid):
 
 
 async def wx_exchange(http, code):
-    comm = dict(YQQ_COMM_BASE, tmeLoginType=1)
+    comm, user_agent = await _android_comm({'tmeLoginType': 1})
     result_code, data = await cgi_call(
-        http, 'music.login.LoginServer', 'Login', {'code': code, 'strAppid': WECHAT_APP_ID}, comm)
+        http, 'music.login.LoginServer', 'Login', {'code': code, 'strAppid': WECHAT_APP_ID}, comm, user_agent)
     return credential_from_login(result_code, data, 1)
 
 
@@ -480,7 +526,9 @@ async def _poll_qr(ls, http, identifier):
             if event == 'done':
                 ls.state = 'conf'
                 if ls.kind == 'qq':
-                    code = await qq_authorize_code(http, info['uin'], info['sigx'])
+                    logger.info('QQ 扫码登录：手机已确认，正在换取登录凭证')
+                    code = await qq_authorize_code(http, info['uin'], info['sigx'], info.get('url', ''),
+                                                   info.get('set_cookies', ()))
                     ls.credential = await qq_exchange(http, code)
                 else:
                     ls.credential = await wx_exchange(http, info)
