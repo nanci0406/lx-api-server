@@ -1,269 +1,421 @@
-# lx-api-server
+<div align="center">
 
-基于 `lx-music-api-server` 改造的多音源解析服务，当前分支将 API 鉴权调整为 SQLite 用户 + Key 模式，并加入 Web 管理后台、解析统计、模块健康检查和登录保活任务。
+<img src="webui/static/img/logo.svg" width="88" alt="LX API Server">
 
-## 功能概览
+# LX API Server
 
-- 支持酷狗、QQ 音乐、网易云音源解析（咪咕、酷我已移除）。
-- 使用 `X-Request-User` 和 `X-Request-Key` 做 API 请求鉴权。
-- 提供 Web 管理后台（同时适配电脑和手机，支持浅色/深色主题），可管理配置、API 用户、解析统计、模块状态、QQ 音乐登录和管理员账号；公开首页可查看服务状态、在线解析单曲、生成音源脚本链接。
-- 支持普通单账号模式和 cookie 池模式。
-- 支持 QQ 音乐、酷狗、网易云的自动刷新登录/保活任务。
-- 首次启动会自动生成默认配置和 SQLite 数据库。
+**自托管的多平台音乐解析服务，为 [LX Music](https://github.com/lyswhut/lx-music-desktop) 提供自定义音源**
 
-## 环境要求
+[![CI](https://github.com/nanci0406/lx-api-server/actions/workflows/ci.yml/badge.svg?branch=SQLite)](https://github.com/nanci0406/lx-api-server/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.10%20%7C%203.12-3776AB?logo=python&logoColor=white)
+![Platforms](https://img.shields.io/badge/%E5%B9%B3%E5%8F%B0-QQ%E9%9F%B3%E4%B9%90%20%C2%B7%20%E9%85%B7%E7%8B%97%20%C2%B7%20%E7%BD%91%E6%98%93%E4%BA%91-D97757)
+![License](https://img.shields.io/badge/license-MIT-5B8DC9)
 
-- Python 3.8+
-- pip
+[功能特性](#功能特性) · [快速开始](#快速开始) · [接入 LX Music](#接入-lx-music) · [API 文档](#api-文档) · [管理后台](#管理后台) · [部署](#部署) · [常见问题](#常见问题)
 
-安装依赖：
+</div>
+
+---
+
+LX API Server 是基于 [lx-music-api-server](https://github.com/MeoProject/lx-music-api-server) 改造的音乐解析后端。它把 QQ 音乐、酷狗音乐、网易云音乐的歌曲解析为可播放的链接，通过“用户名 + Key”对外提供接口，并自带一个适配电脑和手机的 Web 管理后台。扫码登录平台账号、管理用户、查看解析统计、监控账号状态都可以在浏览器里完成，不再需要手动抓包和修改配置文件。
+
+<p align="center">
+  <img src="docs/images/dashboard.png" alt="管理后台概览" width="100%">
+</p>
+
+## 功能特性
+
+**解析服务**
+- 支持 QQ 音乐、酷狗音乐、网易云音乐，最高可解析无损、Hi-Res、杜比全景声等音质（视账号权益而定）
+- 按用户分配 Key，可随时停用、重置；接口支持全局 / 单 IP 限速、IP 封禁、Host 白名单
+- 一键生成 LX Music 自定义音源脚本，用户导入链接即可使用
+- 单账号与账号池（cookie 池）两种模式，账号池按请求随机分配账号
+
+**账号管理**
+- 后台扫码登录：QQ 音乐支持 QQ 扫码、微信扫码、手机验证码，网易云支持 App 扫码，登录后自动写入配置
+- 自动刷新登录（保活）：QQ 音乐、酷狗、网易云的凭证按周期自动续期，新凭证自动写回配置
+- 刷新失败按 1 分钟 → 5 分钟 → 30 分钟 → 2 小时退避重试，并在后台标出异常的任务和平台
+
+**管理后台**
+- 单页应用，适配电脑和手机，支持浅色 / 深色主题，不依赖任何外部 CDN，内网可离线使用
+- 共七个页面：概览、配置、用户、统计、模块状态、音乐账号、账号安全；配置修改后热重载，立即生效
+- 解析统计：按天趋势、平台分布、用户排行，解析记录可按用户 / 平台 / 结果筛选，过期记录自动清理
+
+**安全**
+- 管理员密码使用加盐 scrypt 存储；登录失败限速；会话空闲 4 小时、登录满 24 小时后过期
+- 后台写操作仅接受 JSON 请求并校验来源（防 CSRF），Cookie 为 `HttpOnly` + `SameSite=Strict`，页面启用严格 CSP
+- 日志中不记录用户 Key，状态接口不返回任何凭证
+
+## 界面预览
+
+| 深色模式 | 手机端 |
+| :---: | :---: |
+| <img src="docs/images/dashboard-dark.png" alt="深色模式"> | <img src="docs/images/mobile.png" alt="手机端" width="260"> |
+
+| 配置（分组表单、校验、热重载） | 音乐账号（扫码登录） |
+| :---: | :---: |
+| <img src="docs/images/config.png" alt="配置页"> | <img src="docs/images/music-login.png" alt="音乐账号登录"> |
+
+> 截图中的用户和解析记录为演示数据。
+
+## 快速开始
+
+### 环境要求
+
+- Python 3.10 及以上（CI 在 3.10 与 3.12 上测试）
+- 能访问各音乐平台接口的网络；服务器在中国大陆以外时，部分平台可能需要配置国内代理
+
+### 安装与启动
 
 ```bash
+git clone https://github.com/nanci0406/lx-api-server.git
+cd lx-api-server
 pip install -r requirements.txt
-```
-
-## 启动服务
-
-```bash
 python main.py
 ```
 
-默认监听：
+服务默认监听 `0.0.0.0:9763`。首次启动会在当前目录生成配置文件和数据库（见[数据与文件](#数据与文件)）。
 
-```text
-http://0.0.0.0:9763
+### 首次登录后台
+
+打开 `http://<服务器地址>:9763/admin`，使用管理员账号登录：
+
+- 用户名：`admin`
+- 密码：首次启动时随机生成，打印在启动日志中
+
+也可以在首次启动时通过环境变量指定管理员账号：
+
+```bash
+LX_ADMIN_USERNAME=admin LX_ADMIN_PASSWORD='your-strong-password' python main.py
 ```
 
-首次启动会生成：
+> 环境变量只在管理员账号尚不存在时生效。登录后请在“账号安全”页修改密码。
 
-- `config/config.yml`：主配置文件
-- `config/data.db`：运行数据
-- `cache.db`：请求缓存
-- `app.db`：用户、管理员、解析日志和模块健康状态
+### 三步开始使用
 
-如果仓库目录中存在旧版 `users.db`，启动时会自动迁移旧用户到 `app.db`。
+1. **登录平台账号**：在“音乐账号”页扫码登录 QQ 音乐或网易云音乐，保存时勾选“自动刷新登录”
+2. **创建用户**：在“用户”页新建用户，系统会生成一个随机 Key
+3. **分发音源**：把用户名和 Key（或音源脚本链接）发给使用者
+
+## 接入 LX Music
+
+开启 `common.allow_download_script`（默认开启）后，每位用户都有一个专属的音源脚本地址：
+
+```text
+http://<服务器地址>:9763/script?key=<用户的 Key>
+```
+
+在 LX Music 中打开 **设置 → 自定义源 → 在线导入**，粘贴上述地址即可。脚本中已自动填好服务器地址、用户名和 Key。也可以在后台“用户”页直接复制脚本链接，或在公开首页 `/` 输入 Key 生成。
+
+脚本名称、版本、更新提示以及各平台开放的音质，可在后台“配置 → 音源脚本”中修改。
+
+## API 文档
+
+### 鉴权
+
+`security.key.enable` 开启时（默认开启），解析接口需要在请求头中携带用户名和 Key：
+
+```http
+X-Request-User: alice
+X-Request-Key: <用户的 Key>
+```
+
+### 接口
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/url/{source}/{songId}/{quality}` | 获取播放链接 |
+| `GET` | `/lyric/{source}/{songId}` | 获取歌词 |
+| `GET` | `/info/{source}/{songId}` | 获取歌曲信息 |
+| `GET` | `/mv/{source}/{mvId}` | 获取 MV 信息与播放地址 |
+| `GET` | `/search/kg/song?query=…&page=1&size=20` | 搜索歌曲（仅酷狗） |
+| `GET` | `/script?key=…` | 下载 LX Music 音源脚本 |
+
+各平台支持的方法：
+
+| 平台 | `source` | `songId` | url | lyric | info | mv | search |
+| --- | --- | --- | :---: | :---: | :---: | :---: | :---: |
+| QQ 音乐 | `tx` | songmid | ✓ | ✓ | ✓ | ✓ | |
+| 酷狗音乐 | `kg` | hash | ✓ | ✓ | ✓ | ✓ | ✓ |
+| 网易云音乐 | `wy` | 歌曲 ID | ✓ | | | | |
+
+### 音质
+
+| `quality` | 说明 | QQ 音乐 | 酷狗 | 网易云 |
+| --- | --- | :---: | :---: | :---: |
+| `128k` | 标准 | ✓ | ✓ | ✓ |
+| `192k` | 较高 | | | ✓ |
+| `320k` | 高品质 | ✓ | ✓ | ✓ |
+| `flac` | 无损 | ✓ | ✓ | ✓ |
+| `flac24bit` | Hi-Res | ✓ | ✓ | ✓ |
+| `dolby` | 杜比全景声 | ✓ | | ✓ |
+| `sky` | 沉浸环绕声 | | | ✓ |
+| `master` | 母带 | ✓ | ✓ | ✓ |
+
+实际能拿到的音质取决于所用账号的会员权益。
+
+### 示例
+
+```bash
+curl -H "X-Request-User: alice" \
+     -H "X-Request-Key: <用户的 Key>" \
+     "http://127.0.0.1:9763/url/tx/0039MnYb0qxYhV/320k"
+```
+
+### 响应格式
+
+所有接口返回 JSON：
+
+```json
+{
+  "code": 0,
+  "msg": "success",
+  "data": "https://…",
+  "extra": {
+    "cache": false,
+    "quality": { "target": "320k", "result": "320k" },
+    "expire": { "time": 1760000000, "canExpire": true }
+  }
+}
+```
+
+| `code` | 含义 |
+| :---: | --- |
+| `0` | 成功 |
+| `1` | 未知的平台或不支持的方法；IP 已被封禁；请求来源不被允许 |
+| `2` | 平台返回获取失败（如无版权、账号无权限），原因见 `msg` |
+| `4` | 平台已在配置中关闭，或服务内部错误 |
+| `5` | 触发限速 |
+| `6` | 缺少用户名 / Key、Key 验证失败、请求参数错误或资源不存在 |
 
 ## 管理后台
 
-访问：
+后台地址为 `/admin`，所有页面都由前端路由处理，前端只调用 `/api/admin/*` JSON 接口。
 
-```text
-http://127.0.0.1:9763/admin
-```
+| 页面 | 地址 | 功能 |
+| --- | --- | --- |
+| 概览 | `/admin` | 今日与近 7 天解析量、成功率、趋势图、平台状态、最近解析、定时任务状态 |
+| 配置 | `/admin/config` | 按分组编辑常用配置并校验；从属项随开关联动；密钥只显示“已设置 / 末尾几位”；“原始配置”可直接编辑 `config.yml`，保存前自动备份，加载失败自动恢复 |
+| 用户 | `/admin/users` | 新建、停用、删除用户，重置 Key，复制音源脚本链接，查看每位用户的解析次数与成功率 |
+| 统计 | `/admin/stats` | 今天 / 近 7 天 / 近 30 天的趋势、平台分布、用户排行与可筛选的解析记录 |
+| 模块状态 | `/admin/health` | 各平台可用性与凭证有效性，定时任务的执行情况；可立即检查、立即执行任务 |
+| 音乐账号 | `/admin/music-login` | 扫码 / 验证码登录 QQ 音乐与网易云音乐，保存为主账号或加入账号池 |
+| 账号安全 | `/admin/account` | 修改管理员密码、退出其他设备上的登录 |
 
-默认管理员：
+公开首页 `/` 展示各平台状态，用户可在首页用自己的用户名和 Key 在线解析单曲、生成音源脚本链接。首页只显示笼统的状态，账号细节仅管理员可见。
 
-- 用户名：`admin`
-- 密码：首次启动时随机生成，并打印在启动日志中
+## 平台账号
 
-也可以通过环境变量指定初始管理员：
+### 扫码登录
 
-```bash
-LX_ADMIN_USERNAME=admin LX_ADMIN_PASSWORD=your-password python main.py
-```
+在“音乐账号”页选择平台：
 
-后台包含：
+- **QQ 音乐**：QQ 扫码、微信扫码，或手机号 + 短信验证码（首次可能需要在浏览器中完成一次人机验证，页面会给出链接）
+- **网易云音乐**：使用网易云音乐 App 的“扫一扫”
 
-- 概览（`/admin`）：今日/近 7 天解析、成功率、趋势图、平台状态、最近解析、定时任务是否正常
-- 配置（`/admin/config`）：按分组编辑常用配置，带校验；从属项（如代理地址）在对应开关关闭时会变灰提示；密钥类字段只显示“已设置/末尾几位”。修改后点“保存并生效”即热重载，标有“需重启”的项目要重启服务。“原始配置”页可以直接编辑整个 `config.yml`（保存前自动备份为 `config/config.yml.bak`，新配置无法加载时自动恢复）
-- 用户（`/admin/users`）：新建/停用/删除用户、重置 Key、复制音源脚本链接，查看每位用户的解析次数和成功率
-- 统计（`/admin/stats`）：今天/近 7 天/近 30 天的趋势、平台分布、用户排行，解析记录可按用户/平台/结果筛选
-- 模块状态（`/admin/health`）：各平台状态、定时任务（刷新登录、签到、清理记录）的执行情况，可以立即检查、立即执行任务
-- 音乐账号（`/admin/music-login`，旧地址 `/admin/qqlogin` 会自动跳转）：扫码登录 QQ 音乐和网易云音乐，见下文“音乐账号登录”
-- 账号安全（`/admin/account`）：修改管理员密码、退出其他设备上的登录
+登录成功后可选择：
 
-后台是单页应用，前端只调用 `/api/admin/*` JSON 接口；不依赖任何外部 CDN，可以在内网离线使用。
+- **保存为主账号**：写入 `module.tx.user` / `module.wy.user`
+- **加入账号池**：写入 `module.cookiepool.tx` / `module.cookiepool.wy`，同一账号再次加入会覆盖旧凭证
 
-## API 鉴权
+勾选“自动刷新登录”会同时开启该账号的保活任务，保存后配置立即热重载。保存之前，登录得到的凭证只保存在服务端内存中（最长 10 分钟），任何接口都不会返回凭证本身。
 
-开启 `security.key.enable` 后，请求需要携带：
+### 手动配置
 
-```http
-X-Request-User: 用户名
-X-Request-Key: 用户 Key
-```
+也可以在“配置”页或 `config.yml` 中手动填写：
 
-示例：
+| 平台 | 配置项 | 说明 |
+| --- | --- | --- |
+| QQ 音乐 | `module.tx.user` | `uin`、`qqmusic_key`，以及刷新所需的 `refresh_key`、`refresh_token` 等 |
+| 酷狗音乐 | `module.kg.user` | `userid`、`token`、`mid`（抓包 `/v5/url` 请求获得） |
+| 网易云音乐 | `module.wy.user.cookie` | 完整 Cookie，需包含 `MUSIC_U` |
 
-```bash
-curl \
-  -H "X-Request-User: demo" \
-  -H "X-Request-Key: your-api-key" \
-  "http://127.0.0.1:9763/url/tx/0039MnYb0qxYhV/128k"
-```
+### 自动刷新登录
 
-常见 API 路径：
-
-```text
-/{method}/{source}/{songId}/{quality}
-/{method}/{source}/{songId}
-/local/{type}
-/script
-```
-
-示例：
-
-```text
-/url/tx/{songId}/128k
-/url/kg/{songId}/flac
-/lyric/wy/{songId}
-```
-
-## 自动刷新登录
-
-自动刷新任务由 `common.scheduler` 统一调度。服务启动时会按当前配置显式注册刷新任务，启动日志会打印已加载的任务列表。
-
-非 cookie 池模式下，QQ 音乐刷新登录配置：
+开启各平台的 `refresh_login.enable` 后，服务会按 `refresh_login.interval`（秒）周期续期，刷新返回的新凭证自动写回配置：
 
 ```yaml
 module:
   tx:
     user:
-      qqmusic_key: ""
-      uin: ""
+      uin: "123456"
+      qqmusic_key: "Q_H_L_…"
+      refresh_key: "…"
       refresh_login:
         enable: true
         interval: 86000
 ```
 
-cookie 池模式下，QQ 音乐刷新登录配置：
+- **QQ 音乐**：按保存的 `login_type`（1 微信、2 QQ）选择刷新方式，没有时按 `qqmusic_key` 前缀判断
+- **网易云音乐**：刷新请求与 [NeteaseCloudMusicApi](https://www.npmjs.com/package/NeteaseCloudMusicApi) 一致；返回 `301` 表示 `MUSIC_U` 已失效，需要重新扫码登录
+- **酷狗音乐**：刷新 `token`；概念版（appid 3116）还支持每日自动签到
 
-```yaml
-common:
-  cookiepool: true
+启动日志会列出已注册的定时任务，例如 `scheduler loaded 2 task(s): qqmusic_refresh_login, parse_logs_cleanup`。连续失败的任务会显示在“模块状态”页，对应平台标记为“降级”。
 
-module:
-  cookiepool:
-    tx:
-      - qqmusic_key: ""
-        uin: ""
-        refresh_login:
-          enable: true
-          interval: 86000
+### 账号池
+
+`common.cookiepool` 为 `true` 时，每次请求从 `module.cookiepool.<平台>` 中随机选择一个账号，单账号配置会被忽略。账号池中每个账号可以单独设置 `refresh_login`。
+
+## 配置
+
+配置文件位于 `config/config.yml`，首次启动时自动生成。常用配置项都可以在后台“配置”页修改并热重载；标有“需重启”的项目（如监听地址、端口）需要重启服务才会生效。
+
+| 配置项 | 默认值 | 说明 |
+| --- | --- | --- |
+| `common.hosts` / `common.ports` | `0.0.0.0` / `9763` | 监听地址与端口 |
+| `common.ssl_info.is_https` | `false` | 通过 HTTPS 反向代理访问时设为 `true` |
+| `common.reverse_proxy.real_ip_header` | `X-Real-IP` | 反向代理传递真实 IP 的请求头 |
+| `common.proxy` | 关闭 | 出站请求使用的 HTTP / HTTPS 代理 |
+| `common.cookiepool` | `false` | 账号池模式 |
+| `common.allow_download_script` | `true` | 是否开放 `/script` 音源脚本下载 |
+| `common.parse_log_retention_days` | `30` | 解析记录保留天数，`0` 为不清理 |
+| `security.key.enable` | `true` | 解析接口是否需要用户名和 Key |
+| `security.rate_limit.global` / `.ip` | `0` | 全局 / 单 IP 两次请求的最小间隔（秒），`0` 为不限制 |
+| `security.admin_origin_check` | `true` | 后台写操作的来源校验 |
+| `module.<平台>.enable` | `true` | 是否启用该平台 |
+
+## 部署
+
+### systemd
+
+```ini
+# /etc/systemd/system/lx-api-server.service
+[Unit]
+Description=LX API Server
+After=network-online.target
+
+[Service]
+WorkingDirectory=/opt/lx-api-server
+ExecStart=/usr/bin/python3 main.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
 ```
 
-QQ 音乐刷新登录时会带上并保存完整的登录凭证。除 `qqmusic_key`、`uin` 外，登录时返回的 `refresh_key`、`refresh_token`、`openid`、`access_token`、`unionid` 也可以一并填写（没有的留空即可），刷新成功后程序会把响应里返回的新值自动写回配置。手动更换 `qqmusic_key` 时请同时更新这些字段，否则会用旧凭证去刷新。
-
-```yaml
-module:
-  tx:
-    user:
-      qqmusic_key: ""
-      uin: ""
-      refresh_key: ""
-      refresh_token: ""
-      openid: ""
-      access_token: ""
-      unionid: ""
+```bash
+systemctl daemon-reload
+systemctl enable --now lx-api-server
 ```
 
-网易云刷新登录成功后，服务端返回的新登录 cookie（`MUSIC_U` 等）会合并写回配置里的 cookie（其余字段保持不变）；酷狗会写回新的 `userid` 和 `token`。
+### Nginx 反向代理（HTTPS）
 
-网易云的刷新请求参照 [NeteaseCloudMusicApi](https://www.npmjs.com/package/NeteaseCloudMusicApi) 的 `login_refresh`：走 `https://interface.music.163.com/eapi/login/token/refresh`，cookie 里没有 `os`、`appver`、`deviceId` 等客户端信息时按 PC 客户端补齐（从浏览器复制的 cookie 就属于这种情况）。刷新返回 `301` 表示 `MUSIC_U` 已经失效，刷新救不回来，需要到后台“音乐账号”页重新扫码登录。
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name music.example.com;
 
-刷新登录用哪种请求，优先看配置里的 `login_type`（1 微信、2 QQ，通过后台“音乐账号”页登录时会自动保存），没有时才按 `qqmusic_key` 的前缀（`W_X` 微信、`Q_H_L` QQ）判断，两者都不是则走通用的刷新接口。手动配置的账号不用填 `login_type`。
+    ssl_certificate     /path/to/fullchain.pem;
+    ssl_certificate_key /path/to/privkey.pem;
 
-刷新失败（请求出错、返回非 0 业务码等）不会干等一个完整周期，而是按 1 分钟、5 分钟、30 分钟、2 小时的间隔退避重试（不超过任务自身的刷新间隔），成功后恢复正常周期。连续失败的任务会在后台“模块状态”页的“定时任务状态”里显示，对应模块也会标记为“降级”。
-
-启动后可通过日志确认任务是否注册（`parse_logs_cleanup` 是解析记录的定时清理任务，与登录无关）：
-
-```text
-scheduler loaded 2 task(s): qqmusic_refresh_login, parse_logs_cleanup
+    location / {
+        proxy_pass http://127.0.0.1:9763;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Host $host;
+    }
+}
 ```
 
-cookie 池模式示例：
+使用 HTTPS 反向代理时，请把 `common.ssl_info.is_https` 设为 `true`，这样后台 Cookie 会带上 `Secure` 标记，生成的音源脚本也会使用 `https` 地址。代理需要透传原始的 `Host`，否则后台写操作会因来源校验失败而被拒绝。
 
-```text
-scheduler loaded 2 task(s): qqmusic_refresh_login_pooled_0, parse_logs_cleanup
+### 升级
+
+```bash
+git pull
+pip install -r requirements.txt
+systemctl restart lx-api-server
 ```
 
-如果日志中没有 QQ 音乐刷新任务，请优先检查：
+## 数据与文件
 
-- `common.cookiepool` 是否符合当前使用模式
-- `module.tx.user.refresh_login.enable`
-- `module.cookiepool.tx[*].refresh_login.enable`
-- `module.tx.user.qqmusic_key` 或 `module.cookiepool.tx[*].qqmusic_key`
+运行时生成的文件均已在 `.gitignore` 中忽略：
 
-## 配置热重载
+| 路径 | 内容 |
+| --- | --- |
+| `config/config.yml` | 主配置文件（含平台账号凭证，请妥善保管） |
+| `config/data.db` | 封禁列表、请求时间等运行数据 |
+| `config/tx_device.json` | QQ 音乐验证码登录使用的设备信息 |
+| `app.db` | 用户、管理员、解析记录、模块状态 |
+| `cache.db` | 解析结果与请求缓存 |
+| `logs/` | 运行日志 |
 
-后台保存配置（表单或原始配置）后会立即热重载配置并重建定时任务。刷新登录任务会按最新配置重新注册，cookie 池账号会在任务执行时读取当前配置，避免继续使用启动时的旧 token/key/session。
-
-## 音乐账号登录
-
-后台“音乐账号”页（`/admin/music-login`）可以登录 QQ 音乐和网易云音乐，登录后选择保存为主账号或加入 cookie 池，并可同时开启自动刷新登录。保存后配置会自动热重载，刷新任务立即生效。
-
-### 网易云音乐
-
-用网易云音乐 App 的“扫一扫”扫描页面上的二维码并确认即可（流程参照 NeteaseCloudMusicApi 的 `login_qr_key` / `login_qr_check`）。登录成功后网易云下发的 `MUSIC_U`、`__csrf` 等 cookie 会连同这次登录使用的客户端信息（`os`、`appver`、`deviceId` 等）一起保存到 `module.wy.user.cookie`（或 `module.cookiepool.wy`，同一个账号再次加入会按用户 ID 覆盖）。之后的解析和刷新登录都沿用这台“设备”。
-
-二维码在服务端生成，需要安装依赖 `qrcode`（已写进 `requirements.txt`，升级后请重新执行 `pip install -r requirements.txt`）。如果网易云返回需要安全验证（风控），页面会提示稍后再试。
-
-### QQ 音乐
-
-支持三种方式登录 QQ 音乐：
-
-- QQ 扫码
-- 微信扫码
-- 手机号 + 短信验证码（可能需要先在浏览器里完成一次人机验证，页面会给出验证链接）
-
-登录成功后会拿到完整的登录凭证（`musickey`、`refresh_key`、`refresh_token`、`openid` 等），可以选择保存为主账号（`module.tx.user`）或加入 cookie 池（`module.cookiepool.tx`），并可同时开启该账号的自动刷新登录。保存后配置会自动热重载，刷新任务立即生效，不需要再手动抓包、复制 key。
-
-说明：
-
-- 登录得到的凭证只在服务端内存里保留 10 分钟，点击“保存到配置”后才会写入配置文件；状态接口不会返回凭证本身。
-- 手机号登录会用到一份模拟的安卓设备信息，保存在 `config/tx_device.json`（含向官方申请的 QIMEI，24 小时刷新一次），请不要删除或公开。
-- 暂不支持“手机 QQ 音乐客户端扫码”这种需要 MQTT 的登录方式。
-- 扫码确认后，先按 qqmusic-api-python 的方式请求 `check_sig` 拿 `p_skey`，拿不到时再按浏览器的方式（直接打开 ptlogin 给出的地址并带上相应 Cookie）重试一次；换取凭证和手机验证码登录一样按安卓客户端调用。如果仍然提示“没有拿到 p_skey”，错误信息和日志里会写明每次请求的状态码和跳转去向（不含参数），可以据此排查。
-- 登录协议参考了 [YAQMC/qm-api-rs](https://github.com/YAQMC/qm-api-rs)（GPL-3.0）的文档与行为，代码是独立实现的，没有复制其源码；QIMEI/设备信息部分参考了同源项目 [MeoProject/lx-music-api-server](https://github.com/MeoProject/lx-music-api-server)（MIT）。
-
-## 模块状态
-
-后台“模块状态”除了检查平台域名是否可达、必填配置是否齐全之外，还会反映登录保活任务是否在连续失败，以及 QQ 音乐账号的登录凭证是否已经失效（检查结果缓存 30 分钟，点击“立即检查”会重新检查）。公开首页上只显示笼统状态，具体的任务名、账号信息只有登录后台的管理员能看到。
-
-## 数据库说明
-
-当前分支使用 SQLite：
-
-- `app.db`：用户、管理员、解析日志、模块健康状态
-- `config/data.db`：封禁列表、请求时间等运行数据
-- `cache.db`：HTTP 缓存
-
-解析统计里的记录默认保留 30 天，超期的每天自动清理，可通过 `common.parse_log_retention_days` 调整（0 表示不清理）。
-
-仓库已不再跟踪 `users.db`、`*.db`、`config/`、`logs/` 和 `__pycache__`（见 `.gitignore`），这些都是运行时生成的文件。
-
-后续计划：
-
-- 数据库支持 MySQL
+从旧版本升级时，目录中的 `users.db` 会在启动时自动迁移到 `app.db`。
 
 ## 安全建议
 
-- 部署后请立即修改管理员密码（至少 8 位）。管理员密码使用加盐的 scrypt 保存，旧版本的 sha256 密码会在下次登录成功时自动升级；改密码后该管理员的其他登录会话会失效。
-- 后台登录同一 IP 15 分钟内失败 5 次会被暂时限制；后台会话 4 小时无操作或登录满 24 小时后需要重新登录。
-- 后台的所有修改操作都通过 JSON 接口完成（POST/PUT/PATCH/DELETE，必须是 `application/json` 请求体），会校验请求的 `Origin`/`Referer` 与访问的 Host 一致，后台 Cookie 为 `HttpOnly` + `SameSite=Strict`；页面带有严格的 CSP（不允许内联脚本和样式）。如果你的反向代理改写了 Host，导致后台操作提示“请求来源校验失败”，请让代理透传原始 Host（或设置 `X-Forwarded-Host`），或把配置 `security.admin_origin_check` 设为 `false`。
-- 通过 HTTPS 反向代理访问时，请把 `common.ssl_info.is_https` 设为 `true`，后台 Cookie 才会带上 `Secure` 标记。
-- `security.rate_limit` 的限速只作用于解析接口（含首页的在线解析），后台页面、静态文件和后台接口不受限速影响，否则打开一个页面就会因为同时加载多个文件而被限速。
-- API Key 不会再写入日志。
-- 不要公开真实 API Key、平台 cookie、token、session。
-- 生产环境建议放在 HTTPS 反向代理后。
-- 如果仓库曾提交过真实 `users.db` 或配置文件，请轮换相关 Key。
+- 部署后立即修改默认管理员密码（至少 8 位）
+- 生产环境建议放在 HTTPS 反向代理之后，并保持 `security.key.enable` 开启
+- `config/config.yml` 与 `app.db` 包含账号凭证和用户 Key，不要提交到公开仓库，也不要随意分享
+- 用户 Key 等同于账号密码，泄露后请在“用户”页重置
+- 后台“原始配置”页会显示全部凭证明文，请勿截图外传
 
-## 开发说明
+## 常见问题
 
-检查语法：
+<details>
+<summary><b>QQ 扫码后提示“获取登录凭据失败：没有拿到 p_skey”</b></summary>
 
-```bash
-python -m compileall -q common modules main.py webui
+请先确认服务已更新到最新版本并已重启。新版本会在提示末尾附上每次请求的状态码和跳转去向，例如 `(HTTP 302，跳转到 …)`，可以据此判断是否是 QQ 要求了额外的安全验证。也可以改用手机验证码登录。
+</details>
+
+<details>
+<summary><b>网易云刷新登录提示 code 301</b></summary>
+
+`MUSIC_U` 已经失效，刷新无法恢复。请在“音乐账号”页重新扫码登录。
+</details>
+
+<details>
+<summary><b>后台保存时提示“请求来源校验失败”</b></summary>
+
+通常是反向代理改写了 `Host`。请让代理透传原始 `Host`（或设置 `X-Forwarded-Host`），或者把 `security.admin_origin_check` 设为 `false`。
+</details>
+
+<details>
+<summary><b>服务器在海外，部分平台解析失败</b></summary>
+
+服务启动时会自动检测服务器位置，在海外时自动启用 IP 伪装（`common.fakeip`）。如果仍然失败，请在 `common.proxy` 中配置国内代理。
+</details>
+
+<details>
+<summary><b>网易云扫码提示缺少依赖 qrcode</b></summary>
+
+升级后需要重新执行 `pip install -r requirements.txt` 并重启服务。
+</details>
+
+## 开发
+
+```text
+lx-api-server
+├── main.py           # 入口：HTTP 服务、中间件、解析接口
+├── common/           # 配置、数据库、调度器、HTTP 客户端、鉴权与统计服务
+├── modules/          # 各平台实现：tx（QQ 音乐）、kg（酷狗）、wy（网易云）
+├── webui/            # 管理后台：JSON 接口（api_admin / api_public）与前端静态资源
+├── tests/            # 单元测试
+└── docs/images/      # README 截图
 ```
 
-运行单元测试（测试会在临时目录里运行，不会改动仓库里的配置和数据库）：
-
 ```bash
+# 语法检查
+python -m compileall -q common modules main.py webui
+
+# 运行测试（在临时目录中运行，不会改动仓库内的配置和数据库）
 python -m unittest discover -s tests
 ```
 
-查看当前 Git 状态：
+每次推送和 Pull Request 都会通过 GitHub Actions 在 Python 3.10 与 3.12 上运行全部测试。
 
-```bash
-git status -sb
-```
+## 致谢
+
+- [lx-music-api-server](https://github.com/MeoProject/lx-music-api-server)：本项目的上游，提供了解析服务的基础框架；QIMEI 与设备信息的实现也参考了该项目
+- [YAQMC/qm-api-rs](https://github.com/YAQMC/qm-api-rs)、[qqmusic-api-python](https://github.com/l-1124/QQMusicApi)：QQ 音乐登录协议参考（代码为独立实现）
+- [NeteaseCloudMusicApi](https://www.npmjs.com/package/NeteaseCloudMusicApi)：网易云音乐扫码登录与刷新登录参考
+- [LX Music](https://github.com/lyswhut/lx-music-desktop)：优秀的开源音乐播放器
+
+## 免责声明
+
+本项目仅供学习与技术交流使用，请勿用于商业用途。通过本项目获取的音乐内容，版权归各音乐平台及版权方所有，请在合理范围内使用，并支持正版音乐。使用本项目产生的一切后果由使用者自行承担。
+
+## 许可证
+
+本项目沿用上游项目的 [MIT](https://opensource.org/licenses/MIT) 许可证，详见各源文件头部的许可声明。
