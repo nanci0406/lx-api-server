@@ -6,7 +6,7 @@
 
 **自托管的多平台音乐解析服务，为 [LX Music](https://github.com/lyswhut/lx-music-desktop) 提供自定义音源**
 
-[![CI](https://github.com/nanci0406/lx-api-server/actions/workflows/ci.yml/badge.svg?branch=SQLite)](https://github.com/nanci0406/lx-api-server/actions/workflows/ci.yml)
+[![CI](https://github.com/nanci0406/lx-api-server/actions/workflows/ci.yml/badge.svg)](https://github.com/nanci0406/lx-api-server/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.10%20%7C%203.12-3776AB?logo=python&logoColor=white)
 ![Platforms](https://img.shields.io/badge/%E5%B9%B3%E5%8F%B0-QQ%E9%9F%B3%E4%B9%90%20%C2%B7%20%E9%85%B7%E7%8B%97%20%C2%B7%20%E7%BD%91%E6%98%93%E4%BA%91-D97757)
 ![License](https://img.shields.io/badge/license-MIT-5B8DC9)
